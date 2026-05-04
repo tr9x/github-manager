@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GitHub Manager
+GenericName=GitHub Repository Manager
+Comment=Browse, clone and synchronise your GitHub repositories
+Exec=github-manager
+Icon=system-software-update
+Categories=Development;RevisionControl;Qt;
+Terminal=false
+StartupNotify=true
+Keywords=git;github;repository;clone;version control;
