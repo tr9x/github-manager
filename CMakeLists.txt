@@ -63,6 +63,8 @@ set(GHM_SOURCES
     ${GHM_SRC_DIR}/ui/IdentityDialog.cpp
     ${GHM_SRC_DIR}/ui/AddRemoteDialog.h
     ${GHM_SRC_DIR}/ui/AddRemoteDialog.cpp
+    ${GHM_SRC_DIR}/ui/PublishToGitHubDialog.h
+    ${GHM_SRC_DIR}/ui/PublishToGitHubDialog.cpp
     ${GHM_SRC_DIR}/ui/RepositoryListWidget.h
     ${GHM_SRC_DIR}/ui/RepositoryListWidget.cpp
     ${GHM_SRC_DIR}/ui/RepositoryDetailWidget.h

@@ -89,6 +89,8 @@ private Q_SLOTS:
                                     bool           setUpstream);
     void onLocalRefreshRequested   (const QString& path);
     void onLocalHistoryRequested   (const QString& path);
+    void onPublishToGitHubRequested(const QString& path);
+    void onRepositoryCreated       (const ghm::github::Repository& repo);
     void onEditIdentityRequested();
 
     // Worker callbacks for local flow.
@@ -127,6 +129,20 @@ private:
     QString token_;
     QHash<QString, QString> localPathByFullName_;  // GitHub clone tracking
     QString activeLocalPath_;                       // currently-shown local folder
+    QList<ghm::github::Repository> reposCache_;     // last-fetched GitHub repos
+
+    // Tracks an in-flight "Publish to GitHub" sequence:
+    //   1. (optional) POST /user/repos
+    //   2. worker addRemote(origin, cloneUrl)
+    //   3. (optional) worker pushTo(origin, branch, setUpstream=true)
+    // Each step's completion checks pendingPublishPath_ to decide
+    // whether the result belongs to a publish flow.
+    struct PendingPublish {
+        QString path;          // empty == none in flight
+        QString cloneUrl;
+        bool    pushAfter{false};
+    };
+    PendingPublish pendingPublish_;
 
     // -- widgets --
     QSplitter*               splitter_;

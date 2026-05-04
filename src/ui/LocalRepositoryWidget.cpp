@@ -109,6 +109,9 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     , initBranchEdit_(nullptr)
     , initBtn_(nullptr)
     , tabs_(nullptr)
+    , publishBanner_(nullptr)
+    , publishBannerLabel_(nullptr)
+    , publishBannerBtn_(nullptr)
     , changesList_(nullptr)
     , stageSelectedBtn_(nullptr)
     , unstageSelectedBtn_(nullptr)
@@ -121,6 +124,7 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     , historyDetail_(nullptr)
     , historyRefreshBtn_(nullptr)
     , remotesList_(nullptr)
+    , publishRemoteBtn_(nullptr)
     , addRemoteBtn_(nullptr)
     , removeRemoteBtn_(nullptr)
     , pushRemoteCombo_(nullptr)
@@ -278,6 +282,42 @@ QWidget* LocalRepositoryWidget::buildChangesTab()
 {
     auto* page = new QWidget(this);
 
+    // ── Publish-to-GitHub banner ─────────────────────────────────────
+    // Shown only when the repo has at least one commit but no `origin`
+    // remote. We make it look like a primary call-to-action so the
+    // happy path "init → commit → publish to GitHub" is obvious.
+    publishBanner_ = new QFrame(page);
+    publishBanner_->setObjectName(QStringLiteral("publishBanner"));
+    publishBanner_->setStyleSheet(QStringLiteral(
+        "#publishBanner { background: #1f3a5f; border: 1px solid #2c4f7c; "
+        "border-radius: 6px; padding: 10px; }"));
+    publishBanner_->setVisible(false);
+
+    publishBannerLabel_ = new QLabel(publishBanner_);
+    publishBannerLabel_->setText(
+        tr("<b>Ready to publish?</b><br>"
+           "This folder isn't connected to a GitHub repository yet. "
+           "Create a new one or link to an existing repo to push your commits."));
+    publishBannerLabel_->setTextFormat(Qt::RichText);
+    publishBannerLabel_->setWordWrap(true);
+
+    publishBannerBtn_ = new QPushButton(tr("Publish to GitHub…"), publishBanner_);
+    publishBannerBtn_->setDefault(false);
+    publishBannerBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #2d6cdf; color: white; border: 0; "
+        "padding: 6px 14px; border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover  { background: #3a7af0; } "
+        "QPushButton:pressed{ background: #245bbf; }"));
+    connect(publishBannerBtn_, &QPushButton::clicked,
+            this, &LocalRepositoryWidget::onPublishToGitHubClicked);
+
+    auto* bannerRow = new QHBoxLayout(publishBanner_);
+    bannerRow->setContentsMargins(10, 8, 10, 8);
+    bannerRow->addWidget(publishBannerLabel_, 1);
+    bannerRow->addSpacing(8);
+    bannerRow->addWidget(publishBannerBtn_);
+
+    // ── Files list ──────────────────────────────────────────────────
     changesList_ = new QListWidget(page);
     changesList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     changesList_->setUniformItemSizes(true);
@@ -343,6 +383,7 @@ QWidget* LocalRepositoryWidget::buildChangesTab()
     commitRow->addWidget(commitBtn_);
 
     auto* col = new QVBoxLayout(page);
+    col->addWidget(publishBanner_);
     col->addWidget(changesList_, 1);
     col->addLayout(btnRow);
     col->addWidget(hRule(page));
@@ -405,13 +446,24 @@ QWidget* LocalRepositoryWidget::buildRemotesTab()
 
     addRemoteBtn_    = new QPushButton(tr("Add remote…"), page);
     removeRemoteBtn_ = new QPushButton(tr("Remove"),     page);
+    publishRemoteBtn_ = new QPushButton(tr("Publish to GitHub…"), page);
+    publishRemoteBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #2d6cdf; color: white; border: 0; "
+        "padding: 5px 12px; border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover  { background: #3a7af0; } "
+        "QPushButton:pressed{ background: #245bbf; } "
+        "QPushButton:disabled { background: #3a3f47; color: #707b86; }"));
     removeRemoteBtn_->setEnabled(false);
     connect(addRemoteBtn_,    &QPushButton::clicked,
             this, &LocalRepositoryWidget::onAddRemoteClicked);
     connect(removeRemoteBtn_, &QPushButton::clicked,
             this, &LocalRepositoryWidget::onRemoveRemoteClicked);
+    connect(publishRemoteBtn_, &QPushButton::clicked,
+            this, &LocalRepositoryWidget::onPublishToGitHubClicked);
 
     auto* topRow = new QHBoxLayout;
+    topRow->addWidget(publishRemoteBtn_);
+    topRow->addSpacing(8);
     topRow->addWidget(addRemoteBtn_);
     topRow->addWidget(removeRemoteBtn_);
     topRow->addStretch();
@@ -479,6 +531,7 @@ void LocalRepositoryWidget::setFolder(const QString& path)
     if (remotesList_)  remotesList_->clear();
     if (pushRemoteCombo_) pushRemoteCombo_->clear();
     if (commitMessageEdit_) commitMessageEdit_->clear();
+    if (publishBanner_) publishBanner_->setVisible(false);
 
     pages_->setCurrentWidget(notRepoPage_);
     if (initBranchEdit_) initBranchEdit_->setText(defaultInitBranch_);
@@ -508,6 +561,23 @@ void LocalRepositoryWidget::setLocalState(
     rebuildRemotesList(remotes);
     updateCommitButton();
     updatePushPanel();
+
+    // Decide whether the "Publish to GitHub" call-to-action makes sense.
+    //   * Need at least one commit (otherwise nothing to push)
+    //   * Need no `origin` remote (otherwise the user already wired it)
+    bool hasOrigin = false;
+    for (const auto& r : remotes) {
+        if (r.name == QLatin1String("origin")) { hasOrigin = true; break; }
+    }
+    const bool unborn = branch.isEmpty() || branch.startsWith(QLatin1Char('('));
+    const bool wantsPublish = !unborn && !hasOrigin;
+
+    if (publishBanner_) publishBanner_->setVisible(wantsPublish);
+    if (publishRemoteBtn_) {
+        publishRemoteBtn_->setVisible(!hasOrigin);
+        // Even if origin exists, we still allow re-publishing if the user
+        // wants to (e.g. they removed origin); just don't push it.
+    }
 }
 
 void LocalRepositoryWidget::setHistory(const std::vector<ghm::git::CommitInfo>& commits)
@@ -700,6 +770,12 @@ void LocalRepositoryWidget::onPushClicked()
     if (remote.isEmpty()) return;
     Q_EMIT pushLocalRequested(path_, remote, branch_,
                               pushSetUpstreamBox_->isChecked());
+}
+
+void LocalRepositoryWidget::onPublishToGitHubClicked()
+{
+    if (path_.isEmpty()) return;
+    Q_EMIT publishToGitHubRequested(path_);
 }
 
 // ----- Helpers -------------------------------------------------------------

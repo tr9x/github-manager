@@ -30,6 +30,7 @@ class QStackedWidget;
 class QTabWidget;
 class QComboBox;
 class QCheckBox;
+class QFrame;
 
 namespace ghm::ui {
 
@@ -74,6 +75,7 @@ Q_SIGNALS:
                                const QString& remoteName,
                                const QString& branch,
                                bool           setUpstream);
+    void publishToGitHubRequested(const QString& path);
     void refreshRequested     (const QString& path);
     void historyRequested     (const QString& path);
     void editIdentityRequested();
@@ -92,6 +94,7 @@ private Q_SLOTS:
     void onAddRemoteClicked();
     void onRemoveRemoteClicked();
     void onPushClicked();
+    void onPublishToGitHubClicked();
 
 private:
     void buildUi();
@@ -141,6 +144,9 @@ private:
     QTabWidget* tabs_;
 
     // -- Changes tab --
+    QFrame*         publishBanner_;        // shown when no `origin` remote
+    QLabel*         publishBannerLabel_;
+    QPushButton*    publishBannerBtn_;
     QListWidget*    changesList_;
     QPushButton*    stageSelectedBtn_;
     QPushButton*    unstageSelectedBtn_;
@@ -157,6 +163,7 @@ private:
 
     // -- Remotes tab --
     QListWidget*    remotesList_;
+    QPushButton*    publishRemoteBtn_;     // "Publish to GitHub…"
     QPushButton*    addRemoteBtn_;
     QPushButton*    removeRemoteBtn_;
     QComboBox*      pushRemoteCombo_;

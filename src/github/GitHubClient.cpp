@@ -101,6 +101,20 @@ void GitHubClient::getJson(const QUrl& url,
     });
 }
 
+void GitHubClient::postJson(const QUrl& url,
+                            const QByteArray& body,
+                            std::function<void(QNetworkReply*)> onFinished)
+{
+    QNetworkRequest req = makeAuthedRequest(url, token_);
+    req.setHeader(QNetworkRequest::ContentTypeHeader,
+                  QStringLiteral("application/json"));
+    QNetworkReply* reply = nam_->post(req, body);
+    connect(reply, &QNetworkReply::finished, this, [reply, cb = std::move(onFinished)] {
+        cb(reply);
+        reply->deleteLater();
+    });
+}
+
 void GitHubClient::validateToken()
 {
     if (token_.isEmpty()) {
@@ -173,6 +187,43 @@ void GitHubClient::fetchReposPage(const QUrl& url,
             Q_EMIT repositoriesReady(accumulated);
         }
     });
+}
+
+void GitHubClient::createRepository(const QString& name,
+                                    const QString& description,
+                                    bool           isPrivate,
+                                    bool           autoInit)
+{
+    if (token_.isEmpty()) {
+        Q_EMIT networkError(QStringLiteral("Not signed in — cannot create a repository."));
+        return;
+    }
+    if (name.trimmed().isEmpty()) {
+        Q_EMIT networkError(QStringLiteral("Repository name is required."));
+        return;
+    }
+
+    QJsonObject body;
+    body.insert(QStringLiteral("name"),        name.trimmed());
+    body.insert(QStringLiteral("description"), description);
+    body.insert(QStringLiteral("private"),     isPrivate);
+    body.insert(QStringLiteral("auto_init"),   autoInit);
+
+    const QUrl url(QStringLiteral("%1/user/repos").arg(QString::fromLatin1(kApiBase)));
+    postJson(url, QJsonDocument(body).toJson(QJsonDocument::Compact),
+        [this](QNetworkReply* reply) {
+            if (reply->error() != QNetworkReply::NoError) {
+                Q_EMIT networkError(humaniseHttpError(reply));
+                return;
+            }
+            const auto doc = QJsonDocument::fromJson(reply->readAll());
+            if (!doc.isObject()) {
+                Q_EMIT networkError(QStringLiteral(
+                    "GitHub returned an unexpected response when creating the repository."));
+                return;
+            }
+            Q_EMIT repositoryCreated(parseRepo(doc.object()));
+        });
 }
 
 } // namespace ghm::github

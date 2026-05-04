@@ -4,6 +4,7 @@
 #include "ui/CloneDialog.h"
 #include "ui/IdentityDialog.h"
 #include "ui/AddRemoteDialog.h"
+#include "ui/PublishToGitHubDialog.h"
 #include "ui/RepositoryListWidget.h"
 #include "ui/RepositoryDetailWidget.h"
 #include "ui/LocalRepositoryWidget.h"
@@ -167,6 +168,8 @@ void MainWindow::wireSignals()
             this, &MainWindow::onAuthFailed);
     connect(client_, &ghm::github::GitHubClient::repositoriesReady,
             this, &MainWindow::onRepositoriesReady);
+    connect(client_, &ghm::github::GitHubClient::repositoryCreated,
+            this, &MainWindow::onRepositoryCreated);
     connect(client_, &ghm::github::GitHubClient::networkError,
             this, &MainWindow::onNetworkError);
 
@@ -217,6 +220,8 @@ void MainWindow::wireSignals()
             this, &MainWindow::onLocalRemoveRemoteRequested);
     connect(localDetail_, &LocalRepositoryWidget::pushLocalRequested,
             this, &MainWindow::onLocalPushRequested);
+    connect(localDetail_, &LocalRepositoryWidget::publishToGitHubRequested,
+            this, &MainWindow::onPublishToGitHubRequested);
     connect(localDetail_, &LocalRepositoryWidget::refreshRequested,
             this, &MainWindow::onLocalRefreshRequested);
     connect(localDetail_, &LocalRepositoryWidget::historyRequested,
@@ -414,6 +419,7 @@ void MainWindow::onRepositoriesReady(const QList<ghm::github::Repository>& repos
         const auto it = localPathByFullName_.constFind(r.fullName);
         if (it != localPathByFullName_.cend()) r.localPath = it.value();
     }
+    reposCache_ = annotated;
     repoList_->setRepositories(annotated);
     setBusy(false);
     setStatus(tr("Loaded %1 repositories.").arg(annotated.size()), 4000);
@@ -422,6 +428,18 @@ void MainWindow::onRepositoriesReady(const QList<ghm::github::Repository>& repos
 void MainWindow::onNetworkError(const QString& msg)
 {
     setBusy(false);
+
+    // If the failure interrupted a Publish-to-GitHub flow (e.g. POST
+    // /user/repos returned 422 "name already exists"), unwind the
+    // pending state so the next attempt starts clean.
+    if (!pendingPublish_.path.isEmpty()) {
+        const QString path = pendingPublish_.path;
+        pendingPublish_ = {};
+        localDetail_->setBusy(false);
+        QMessageBox::warning(this, tr("Publish failed"), msg);
+        if (activeLocalPath_ == path) worker_->refreshLocalState(path);
+        return;
+    }
     QMessageBox::warning(this, tr("Network error"), msg);
 }
 
@@ -542,10 +560,20 @@ void MainWindow::onPushFinished(bool ok, const QString& localPath, const QString
     setBusy(false);
     localDetail_->setBusy(false);
 
+    // Was this push the final step of a Publish-to-GitHub flow?
+    const bool wasPublishPush = !pendingPublish_.path.isEmpty()
+                             &&  pendingPublish_.path == localPath;
+    if (wasPublishPush) pendingPublish_ = {};
+
     if (!ok) {
-        QMessageBox::warning(this, tr("Push failed"), error);
+        QMessageBox::warning(this,
+            wasPublishPush ? tr("Publish failed at push") : tr("Push failed"),
+            wasPublishPush
+                ? tr("The remote is connected, but pushing your commits failed:\n\n%1\n\n"
+                     "You can retry from the Remotes tab.").arg(error)
+                : error);
     } else {
-        setStatus(tr("Push complete."), 4000);
+        setStatus(wasPublishPush ? tr("Published to GitHub.") : tr("Push complete."), 5000);
     }
 
     if (activeLocalPath_ == localPath) {
@@ -740,6 +768,91 @@ void MainWindow::onLocalHistoryRequested(const QString& path)
     worker_->loadHistory(path, /*maxCount*/ 200);
 }
 
+void MainWindow::onPublishToGitHubRequested(const QString& path)
+{
+    if (path.isEmpty()) return;
+    if (token_.isEmpty()) {
+        QMessageBox::information(this, tr("Sign in required"),
+            tr("Publishing requires being signed in to GitHub. Please sign in first."));
+        promptLogin();
+        if (token_.isEmpty()) return;
+    }
+    if (!pendingPublish_.path.isEmpty()) {
+        QMessageBox::information(this, tr("Already publishing"),
+            tr("Another publish operation is in progress — please wait for it to finish."));
+        return;
+    }
+
+    const QString folderName = QFileInfo(path).fileName();
+    PublishToGitHubDialog dlg(folderName,
+                              /*suggestedRepoName*/ QString(),
+                              /*accountLogin*/      username_,
+                              /*knownRepos*/        reposCache_,
+                              this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    // Snapshot dialog state into pending publish.
+    pendingPublish_.path      = path;
+    pendingPublish_.cloneUrl  .clear();
+    pendingPublish_.pushAfter = dlg.pushAfterPublish();
+
+    if (dlg.mode() == PublishToGitHubDialog::Mode::CreateNew) {
+        // Step 1: create the repo on GitHub. We resume the flow in
+        // onRepositoryCreated() once the API call comes back.
+        setBusy(true, tr("Creating GitHub repository \"%1\"…").arg(dlg.name()));
+        client_->createRepository(dlg.name(), dlg.description(),
+                                  dlg.isPrivate(), /*autoInit*/ false);
+    } else {
+        // Skip step 1 — we already have the repo metadata.
+        const auto repo = dlg.existingRepo();
+        if (!repo.isValid() || repo.cloneUrl.isEmpty()) {
+            pendingPublish_ = {};
+            QMessageBox::warning(this, tr("Publish failed"),
+                tr("The selected repository has no clone URL. Try refreshing the list."));
+            return;
+        }
+        pendingPublish_.cloneUrl = repo.cloneUrl;
+        // Track this clone so the sidebar's GitHub section shows the badge.
+        rememberLocalPath(repo.fullName, path);
+
+        setBusy(true, tr("Linking %1 → %2…").arg(folderName, repo.fullName));
+        localDetail_->setBusy(true);
+        worker_->addRemote(path, QStringLiteral("origin"), repo.cloneUrl);
+    }
+}
+
+void MainWindow::onRepositoryCreated(const ghm::github::Repository& repo)
+{
+    // We only ever reach this path through the publish flow, but we
+    // guard regardless: if a stray repositoryCreated arrives without a
+    // pending publish, just refresh the listing and treat it as info.
+    if (pendingPublish_.path.isEmpty() || !repo.isValid()) {
+        setBusy(false);
+        if (repo.isValid()) {
+            setStatus(tr("Created %1.").arg(repo.fullName), 5000);
+            refreshRepositories();
+        }
+        return;
+    }
+
+    pendingPublish_.cloneUrl = repo.cloneUrl;
+    // Optimistically reflect in our caches so the sidebar updates the
+    // moment the worker confirms the local remote-add.
+    rememberLocalPath(repo.fullName, pendingPublish_.path);
+
+    // Insert into the cached list as well so PublishToGitHubDialog
+    // future-opens see the new repo without a manual refresh.
+    auto annotated = repo;
+    annotated.localPath = pendingPublish_.path;
+    reposCache_.prepend(annotated);
+    repoList_->setRepositories(reposCache_);
+
+    setStatus(tr("Created %1 — wiring up origin…").arg(repo.fullName));
+    localDetail_->setBusy(true);
+    worker_->addRemote(pendingPublish_.path,
+                       QStringLiteral("origin"), repo.cloneUrl);
+}
+
 void MainWindow::onEditIdentityRequested()
 {
     IdentityDialog dlg(settings_->authorName(), settings_->authorEmail(), this);
@@ -772,6 +885,34 @@ void MainWindow::onLocalStateReady(
     const std::vector<ghm::git::StatusEntry>&  entries,
     const std::vector<ghm::git::RemoteInfo>&   remotes)
 {
+    // The publish state machine doesn't care which folder the user has
+    // currently focused — it tracks paths independently. Resolve it
+    // before applying the activeLocalPath filter below.
+    if (!pendingPublish_.path.isEmpty()
+        && pendingPublish_.path == path
+        && pendingPublish_.pushAfter)
+    {
+        const bool unborn = branch.isEmpty() || branch.startsWith(QLatin1Char('('));
+        if (unborn) {
+            pendingPublish_ = {};
+            setBusy(false);
+            localDetail_->setBusy(false);
+            QMessageBox::information(this, tr("Nothing to push yet"),
+                tr("The remote is connected, but this branch has no commits. "
+                   "Make a commit and then push from the Remotes tab."));
+        } else {
+            // pushAfter is one-shot — clear it before triggering push so
+            // the push completion handler treats it like any other push.
+            pendingPublish_.pushAfter = false;
+            setBusy(true, tr("Pushing %1 → origin…").arg(branch));
+            localDetail_->setBusy(true);
+            worker_->pushTo(path, QStringLiteral("origin"), branch,
+                            /*setUpstreamAfter*/ true, token_);
+            // Push fired; don't return — still want to refresh the UI
+            // for the active path if it matches.
+        }
+    }
+
     if (path != activeLocalPath_) return;
     localDetail_->setBusy(false);
     localDetail_->setLocalState(isRepository, branch, entries, remotes);
@@ -826,7 +967,61 @@ void MainWindow::onHistoryReady(const QString& path,
 void MainWindow::onRemoteOpFinished(bool ok, const QString& path, const QString& error)
 {
     localDetail_->setBusy(false);
-    if (!ok) QMessageBox::warning(this, tr("Remote operation failed"), error);
+
+    // Is this the addRemote step of a publish flow?
+    const bool isPublishStep = !pendingPublish_.path.isEmpty()
+                            &&  pendingPublish_.path == path
+                            && !pendingPublish_.cloneUrl.isEmpty();
+
+    if (!ok) {
+        if (isPublishStep) {
+            const auto cloneUrl = pendingPublish_.cloneUrl;
+            pendingPublish_ = {};
+            setBusy(false);
+            QMessageBox::warning(this, tr("Publish failed"),
+                tr("The GitHub repository was created (or selected), but wiring up "
+                   "the local 'origin' remote failed:\n\n%1\n\n"
+                   "You can add it manually with:\n  git remote add origin %2")
+                    .arg(error, cloneUrl));
+            if (activeLocalPath_ == path) worker_->refreshLocalState(path);
+            return;
+        }
+        QMessageBox::warning(this, tr("Remote operation failed"), error);
+        if (activeLocalPath_ == path) worker_->refreshLocalState(path);
+        return;
+    }
+
+    if (isPublishStep) {
+        // Remote successfully added. Either push next, or wrap up.
+        if (pendingPublish_.pushAfter) {
+            const QString branch = localDetail_->currentPath() == path
+                                       ? QString() : QString();
+            // Read the branch name straight from the worker's last
+            // localStateReady — we cached it via setLocalState. The
+            // simplest way is to refresh first, but that's an extra
+            // round-trip; since we just successfully ran addRemote,
+            // we can rely on localDetail_'s current branch_ field via
+            // a fresh refresh call:
+            setStatus(tr("Pushing to GitHub…"));
+            // Refresh state to pick up the new remote, then in the
+            // callback chain push. Easier: just push using whichever
+            // branch the user is currently on. We grab it from libgit2.
+            // For robustness we go through refreshLocalState first so
+            // the UI reflects the new remote, *then* push.
+            worker_->refreshLocalState(path);
+            // Use the just-confirmed snapshot — we'll trigger push from
+            // onLocalStateReady by checking pendingPublish_.
+            return;
+        }
+        const auto fullClone = pendingPublish_.cloneUrl;
+        pendingPublish_ = {};
+        setBusy(false);
+        setStatus(tr("Connected to %1.").arg(fullClone), 6000);
+        if (activeLocalPath_ == path) worker_->refreshLocalState(path);
+        return;
+    }
+
+    // Plain manual remote add/remove from the Remotes tab.
     if (activeLocalPath_ == path) worker_->refreshLocalState(path);
 }
 
