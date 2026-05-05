@@ -31,8 +31,13 @@ class QTabWidget;
 class QComboBox;
 class QCheckBox;
 class QFrame;
+class QSplitter;
+class QFileSystemWatcher;
+class QTimer;
 
 namespace ghm::ui {
+
+class DiffViewWidget;
 
 class LocalRepositoryWidget : public QWidget {
     Q_OBJECT
@@ -53,6 +58,22 @@ public:
 
     // Fed by GitWorker::historyReady.
     void setHistory(const std::vector<ghm::git::CommitInfo>& commits);
+
+    // Updates the branch picker contents. Called after worker fires
+    // branchInfosReady; entries are already sorted (current first).
+    void setBranches(const std::vector<ghm::git::BranchInfo>& branches);
+
+    // Fed by GitWorker::commitDiffReady. Populates the file list in
+    // the History tab and clears any previously-shown commit diff.
+    void setCommitDiff(const QString& sha,
+                       const std::vector<ghm::git::FileDiff>& files,
+                       const QString& error);
+
+    // Fed by GitWorker::fileDiffReady. The widget filters out late
+    // results that don't match the currently-selected file.
+    void setFileDiff(const QString& repoRelPath,
+                     const ghm::git::FileDiff& diff,
+                     const QString& error);
 
     // Fed by Settings on startup and after IdentityDialog accept.
     void setIdentity(const QString& name, const QString& email);
@@ -80,6 +101,24 @@ Q_SIGNALS:
     void historyRequested     (const QString& path);
     void editIdentityRequested();
 
+    // Asks the host (MainWindow) to compute a diff for `repoRelPath`
+    // in the given scope. The widget itself is dumb about diffs —
+    // displays whatever comes back via setFileDiff().
+    void diffRequested(const QString& path,
+                       const QString& repoRelPath,
+                       ghm::git::DiffScope scope);
+
+    // Fired when the user picks a commit in the History tab. The host
+    // (MainWindow) responds with setCommitDiff() once the worker
+    // returns.
+    void commitDiffRequested(const QString& path, const QString& sha);
+
+    // Branch operations. The host opens any required dialogs and calls
+    // back into this widget via setBranches() once the worker reports.
+    void branchSwitchRequested(const QString& path, const QString& branch);
+    void branchCreateRequested(const QString& path);
+    void branchDeleteRequested(const QString& path, const QString& branch);
+
 private Q_SLOTS:
     void onInitClicked();
     void onStageSelectedClicked();
@@ -88,13 +127,22 @@ private Q_SLOTS:
     void onRefreshClicked();
     void onCommitClicked();
     void onChangesItemDoubleClicked(QListWidgetItem* item);
+    void onChangesSelectionChanged();
     void onTabChanged(int index);
     void onHistoryRefreshClicked();
     void onHistorySelectionChanged();
+    // Selecting a file in the commit-files list shows that file's
+    // diff in the lower diff pane.
+    void onCommitFileSelectionChanged();
     void onAddRemoteClicked();
     void onRemoveRemoteClicked();
     void onPushClicked();
     void onPublishToGitHubClicked();
+    // Auto-refresh: fired by QFileSystemWatcher; debounced via timer.
+    void onWatchedPathChanged();
+    void onAutoRefreshTimeout();
+    // Branch picker — opens the popup menu when the button is clicked.
+    void onBranchButtonClicked();
 
 private:
     void buildUi();
@@ -113,6 +161,18 @@ private:
     void updatePushPanel();
     void updateIdentityBar();
 
+    // Re-points the QFileSystemWatcher at the new repo. Called from
+    // setFolder() and from refresh callbacks where the .git directory
+    // might have just been created (init flow).
+    void setupWatcher();
+
+    // Empties the watcher of all paths.
+    void teardownWatcher();
+
+    // Asks for a fresh diff for whatever the user has selected. Called
+    // when the selection changes and after auto-refresh fires.
+    void requestDiffForSelection();
+
     // -- state --
     QString                                path_;
     QString                                branch_;
@@ -127,9 +187,13 @@ private:
     // -- header (always visible) --
     QLabel*    folderLabel_;
     QLabel*    pathLabel_;
-    QLabel*    branchLabel_;
+    QToolButton* branchButton_;       // the branch picker
     QLabel*    identityLabel_;
     QToolButton* identityEditBtn_;
+
+    // Cached branch list, populated by setBranches(). The popup menu
+    // is built fresh from this on each open.
+    std::vector<ghm::git::BranchInfo> branchInfos_;
 
     // -- pages --
     QStackedWidget* pages_;
@@ -147,6 +211,7 @@ private:
     QFrame*         publishBanner_;        // shown when no `origin` remote
     QLabel*         publishBannerLabel_;
     QPushButton*    publishBannerBtn_;
+    QSplitter*      changesSplitter_;      // top: file list, bottom: diff
     QListWidget*    changesList_;
     QPushButton*    stageSelectedBtn_;
     QPushButton*    unstageSelectedBtn_;
@@ -155,11 +220,18 @@ private:
     QPlainTextEdit* commitMessageEdit_;
     QPushButton*    commitBtn_;
     QLabel*         commitHintLabel_;
+    DiffViewWidget* diffView_;
+    QString         currentDiffPath_;       // currently-shown file's repo-rel path
 
     // -- History tab --
     QListWidget*    historyList_;
     QPlainTextEdit* historyDetail_;
     QPushButton*    historyRefreshBtn_;
+    // Files changed by the selected commit + per-file diff pane.
+    QListWidget*    commitFilesList_;
+    DiffViewWidget* commitDiffView_;
+    QString         currentCommitSha_;          // commit being shown
+    std::vector<ghm::git::FileDiff> currentCommitFiles_;
 
     // -- Remotes tab --
     QListWidget*    remotesList_;
@@ -170,6 +242,14 @@ private:
     QLabel*         pushBranchLabel_;
     QCheckBox*      pushSetUpstreamBox_;
     QPushButton*    pushBtn_;
+
+    // -- Auto-refresh infrastructure ----------------------------------
+    // Watches .git/HEAD, .git/index, and the working-tree root for
+    // external changes (file edits, CLI git operations, etc.). Hits
+    // are debounced through autoRefreshTimer_ so a `git add .` from
+    // the terminal doesn't trigger N refreshes back-to-back.
+    QFileSystemWatcher* watcher_;
+    QTimer*             autoRefreshTimer_;
 };
 
 } // namespace ghm::ui

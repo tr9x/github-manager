@@ -1,8 +1,9 @@
 // main.cpp - application entry point.
 //
-// Bootstraps Qt, applies the dark stylesheet, and shows MainWindow.
-// MainWindow itself decides whether to prompt the user for login by
-// querying SecureStorage on construction.
+// Bootstraps Qt, applies the dark stylesheet, installs the translator
+// so the UI comes up in the user's preferred language, and shows
+// MainWindow. MainWindow itself decides whether to prompt the user for
+// login by querying SecureStorage on construction.
 
 #include <QApplication>
 #include <QFile>
@@ -10,6 +11,8 @@
 #include <QStyleHints>
 
 #include "ui/MainWindow.h"
+#include "core/Settings.h"
+#include "core/Translator.h"
 
 int main(int argc, char** argv)
 {
@@ -21,6 +24,16 @@ int main(int argc, char** argv)
     QApplication::setApplicationDisplayName("GitHub Manager");
     QApplication::setApplicationVersion(GHM_VERSION);
     QApplication::setWindowIcon(QIcon::fromTheme("system-software-update"));
+
+    // Install the language translator BEFORE constructing any widgets,
+    // so labels/menu titles built in widget constructors run through
+    // it. The translator stays alive for the lifetime of QApplication.
+    auto* translator = new ghm::core::Translator(&app);
+    {
+        ghm::core::Settings settings;
+        translator->setLanguage(settings.language());
+    }
+    QApplication::installTranslator(translator);
 
     // Load the bundled dark stylesheet. Users on systems with a strong
     // light preference can disable this with --no-dark-mode.

@@ -1,4 +1,5 @@
 #include "ui/LocalRepositoryWidget.h"
+#include "ui/DiffViewWidget.h"
 
 #include <QLabel>
 #include <QPushButton>
@@ -21,6 +22,9 @@
 #include <QLocale>
 #include <QDateTime>
 #include <QFontDatabase>
+#include <QFileSystemWatcher>
+#include <QTimer>
+#include <QCursor>
 
 namespace ghm::ui {
 
@@ -100,7 +104,7 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     : QWidget(parent)
     , folderLabel_(nullptr)
     , pathLabel_(nullptr)
-    , branchLabel_(nullptr)
+    , branchButton_(nullptr)
     , identityLabel_(nullptr)
     , identityEditBtn_(nullptr)
     , pages_(nullptr)
@@ -112,6 +116,7 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     , publishBanner_(nullptr)
     , publishBannerLabel_(nullptr)
     , publishBannerBtn_(nullptr)
+    , changesSplitter_(nullptr)
     , changesList_(nullptr)
     , stageSelectedBtn_(nullptr)
     , unstageSelectedBtn_(nullptr)
@@ -120,9 +125,12 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     , commitMessageEdit_(nullptr)
     , commitBtn_(nullptr)
     , commitHintLabel_(nullptr)
+    , diffView_(nullptr)
     , historyList_(nullptr)
     , historyDetail_(nullptr)
     , historyRefreshBtn_(nullptr)
+    , commitFilesList_(nullptr)
+    , commitDiffView_(nullptr)
     , remotesList_(nullptr)
     , publishRemoteBtn_(nullptr)
     , addRemoteBtn_(nullptr)
@@ -131,7 +139,20 @@ LocalRepositoryWidget::LocalRepositoryWidget(QWidget* parent)
     , pushBranchLabel_(nullptr)
     , pushSetUpstreamBox_(nullptr)
     , pushBtn_(nullptr)
+    , watcher_(new QFileSystemWatcher(this))
+    , autoRefreshTimer_(new QTimer(this))
 {
+    autoRefreshTimer_->setSingleShot(true);
+    // 300ms feels responsive without thrashing during a `git add .` from
+    // the CLI that touches the index a couple of times in quick succession.
+    autoRefreshTimer_->setInterval(300);
+    connect(autoRefreshTimer_, &QTimer::timeout,
+            this, &LocalRepositoryWidget::onAutoRefreshTimeout);
+    connect(watcher_, &QFileSystemWatcher::fileChanged,
+            this, &LocalRepositoryWidget::onWatchedPathChanged);
+    connect(watcher_, &QFileSystemWatcher::directoryChanged,
+            this, &LocalRepositoryWidget::onWatchedPathChanged);
+
     buildUi();
 }
 
@@ -174,10 +195,22 @@ void LocalRepositoryWidget::buildHeader(QWidget* container)
     pathLabel_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     pathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-    branchLabel_ = new QLabel(container);
-    branchLabel_->setStyleSheet(
-        QStringLiteral("padding: 2px 8px; border: 1px solid #444; border-radius: 10px; "
-                       "background: #2a2f36;"));
+    branchButton_ = new QToolButton(container);
+    branchButton_->setText(QStringLiteral("—"));
+    branchButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    branchButton_->setPopupMode(QToolButton::InstantPopup);
+    branchButton_->setCursor(Qt::PointingHandCursor);
+    branchButton_->setStyleSheet(QStringLiteral(
+        "QToolButton { padding: 3px 10px; border: 1px solid #444; "
+        "border-radius: 10px; background: #2a2f36; color: #d8dde2; } "
+        "QToolButton:hover { background: #343a44; border-color: #5a6070; } "
+        "QToolButton::menu-indicator { image: none; } " // we draw our own ▾
+    ));
+    // Ensure the click opens our popup rather than nothing — we handle
+    // it ourselves so the popup can be rebuilt fresh from branchInfos_
+    // on each open (catches branches that materialised externally).
+    connect(branchButton_, &QToolButton::clicked,
+            this, &LocalRepositoryWidget::onBranchButtonClicked);
 
     identityLabel_   = new QLabel(container);
     identityLabel_->setStyleSheet(QStringLiteral("color: #9aa0a6;"));
@@ -189,7 +222,7 @@ void LocalRepositoryWidget::buildHeader(QWidget* container)
 
     auto* metaRow = new QHBoxLayout;
     metaRow->setContentsMargins(0, 0, 0, 0);
-    metaRow->addWidget(branchLabel_);
+    metaRow->addWidget(branchButton_);
     metaRow->addSpacing(12);
     metaRow->addWidget(identityLabel_);
     metaRow->addWidget(identityEditBtn_);
@@ -382,13 +415,33 @@ QWidget* LocalRepositoryWidget::buildChangesTab()
     commitRow->addWidget(commitHintLabel_, 1);
     commitRow->addWidget(commitBtn_);
 
+    // ── Diff panel ─────────────────────────────────────────────────
+    diffView_ = new DiffViewWidget(page);
+    connect(changesList_, &QListWidget::itemSelectionChanged,
+            this, &LocalRepositoryWidget::onChangesSelectionChanged);
+
+    // Top half: file list + buttons + commit form. Bottom half: diff.
+    // QSplitter handles vertical resizing, sticky positions on user drag.
+    auto* topPane = new QWidget(page);
+    auto* topCol  = new QVBoxLayout(topPane);
+    topCol->setContentsMargins(0, 0, 0, 0);
+    topCol->addWidget(publishBanner_);
+    topCol->addWidget(changesList_, 1);
+    topCol->addLayout(btnRow);
+    topCol->addWidget(hRule(topPane));
+    topCol->addWidget(commitMessageEdit_);
+    topCol->addLayout(commitRow);
+
+    changesSplitter_ = new QSplitter(Qt::Vertical, page);
+    changesSplitter_->addWidget(topPane);
+    changesSplitter_->addWidget(diffView_);
+    changesSplitter_->setStretchFactor(0, 3);
+    changesSplitter_->setStretchFactor(1, 4);
+    changesSplitter_->setChildrenCollapsible(false);
+
     auto* col = new QVBoxLayout(page);
-    col->addWidget(publishBanner_);
-    col->addWidget(changesList_, 1);
-    col->addLayout(btnRow);
-    col->addWidget(hRule(page));
-    col->addWidget(commitMessageEdit_);
-    col->addLayout(commitRow);
+    col->setContentsMargins(0, 0, 0, 0);
+    col->addWidget(changesSplitter_, 1);
 
     updateCommitButton();
     return page;
@@ -408,12 +461,39 @@ QWidget* LocalRepositoryWidget::buildHistoryTab()
     historyDetail_->setReadOnly(true);
     historyDetail_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     historyDetail_->setPlaceholderText(tr("Select a commit to see its full message."));
+    historyDetail_->setMaximumHeight(180);
+
+    // Files changed by the selected commit. Tight list — paths only,
+    // colour-coded prefix to indicate add/modify/delete (same letters
+    // as the Changes tab so users learn one vocabulary).
+    commitFilesList_ = new QListWidget(page);
+    commitFilesList_->setUniformItemSizes(true);
+    commitFilesList_->setAlternatingRowColors(true);
+    commitFilesList_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    connect(commitFilesList_, &QListWidget::itemSelectionChanged,
+            this, &LocalRepositoryWidget::onCommitFileSelectionChanged);
+
+    commitDiffView_ = new DiffViewWidget(page);
+
+    // Three-level vertical layout: commits → message+filelist → diff.
+    // The middle row is itself a horizontal splitter so the user can
+    // give files more room when the message is short, or the message
+    // more room when there are lots of files.
+    auto* midRow = new QSplitter(Qt::Horizontal, page);
+    midRow->addWidget(historyDetail_);
+    midRow->addWidget(commitFilesList_);
+    midRow->setStretchFactor(0, 3);
+    midRow->setStretchFactor(1, 2);
+    midRow->setChildrenCollapsible(false);
 
     auto* split = new QSplitter(Qt::Vertical, page);
     split->addWidget(historyList_);
-    split->addWidget(historyDetail_);
-    split->setStretchFactor(0, 3);
-    split->setStretchFactor(1, 1);
+    split->addWidget(midRow);
+    split->addWidget(commitDiffView_);
+    split->setStretchFactor(0, 2);
+    split->setStretchFactor(1, 2);
+    split->setStretchFactor(2, 5);
+    split->setChildrenCollapsible(false);
 
     historyRefreshBtn_ = new QPushButton(tr("Refresh"), page);
     historyRefreshBtn_->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
@@ -520,11 +600,12 @@ void LocalRepositoryWidget::setFolder(const QString& path)
     historyLoaded_ = false;
     branch_.clear();
     remotes_.clear();
+    currentDiffPath_.clear();
 
     folderLabel_->setText(QFileInfo(path).fileName());
     pathLabel_->setText(QDir::toNativeSeparators(path));
 
-    branchLabel_->setText(QStringLiteral("—"));
+    branchButton_->setText(QStringLiteral("—"));
     if (changesList_)  changesList_->clear();
     if (historyList_)  historyList_->clear();
     if (historyDetail_) historyDetail_->clear();
@@ -532,10 +613,20 @@ void LocalRepositoryWidget::setFolder(const QString& path)
     if (pushRemoteCombo_) pushRemoteCombo_->clear();
     if (commitMessageEdit_) commitMessageEdit_->clear();
     if (publishBanner_) publishBanner_->setVisible(false);
+    if (diffView_) diffView_->clear();
+    currentCommitSha_.clear();
+    currentCommitFiles_.clear();
+    if (commitFilesList_) commitFilesList_->clear();
+    if (commitDiffView_)  commitDiffView_->clear();
 
     pages_->setCurrentWidget(notRepoPage_);
     if (initBranchEdit_) initBranchEdit_->setText(defaultInitBranch_);
     updateIdentityBar();
+
+    // Re-point the watcher at the new folder. It's harmless to do this
+    // even when the folder isn't a git repo yet — setupWatcher() guards
+    // against missing paths.
+    setupWatcher();
 }
 
 void LocalRepositoryWidget::setLocalState(
@@ -550,12 +641,13 @@ void LocalRepositoryWidget::setLocalState(
 
     if (!isRepository) {
         pages_->setCurrentWidget(notRepoPage_);
-        branchLabel_->setText(QStringLiteral("—"));
+        branchButton_->setText(QStringLiteral("—"));
         return;
     }
 
     pages_->setCurrentWidget(repoPage_);
-    branchLabel_->setText(branch.isEmpty() ? QStringLiteral("(unborn)") : branch);
+    branchButton_->setText(branch.isEmpty() ? QStringLiteral("(unborn)")
+                                            : branch + QStringLiteral("  ▾"));
 
     rebuildChangesList(entries);
     rebuildRemotesList(remotes);
@@ -578,6 +670,16 @@ void LocalRepositoryWidget::setLocalState(
         // Even if origin exists, we still allow re-publishing if the user
         // wants to (e.g. they removed origin); just don't push it.
     }
+
+    // .git just got created (init flow) — re-watch. Idempotent for the
+    // already-watched case.
+    setupWatcher();
+
+    // If a file is currently selected in the changes list, refresh its
+    // diff so the panel stays in sync with the new state. Ask the host
+    // for it; if the file is no longer in the list, the request will
+    // simply be filtered out by the freshness check in setFileDiff.
+    requestDiffForSelection();
 }
 
 void LocalRepositoryWidget::setHistory(const std::vector<ghm::git::CommitInfo>& commits)
@@ -585,6 +687,10 @@ void LocalRepositoryWidget::setHistory(const std::vector<ghm::git::CommitInfo>& 
     historyLoaded_ = true;
     historyList_->clear();
     historyDetail_->clear();
+    currentCommitSha_.clear();
+    currentCommitFiles_.clear();
+    if (commitFilesList_) commitFilesList_->clear();
+    if (commitDiffView_)  commitDiffView_->clear();
 
     if (commits.empty()) {
         auto* item = new QListWidgetItem(
@@ -728,7 +834,14 @@ void LocalRepositoryWidget::onHistoryRefreshClicked()
 void LocalRepositoryWidget::onHistorySelectionChanged()
 {
     auto items = historyList_->selectedItems();
-    if (items.isEmpty()) { historyDetail_->clear(); return; }
+    if (items.isEmpty()) {
+        historyDetail_->clear();
+        currentCommitSha_.clear();
+        currentCommitFiles_.clear();
+        if (commitFilesList_) commitFilesList_->clear();
+        if (commitDiffView_)  commitDiffView_->clear();
+        return;
+    }
     auto* it = items.first();
     const QString id      = it->data(kCommitRole).toString();
     const QString message = it->data(Qt::UserRole + 2).toString();
@@ -743,6 +856,34 @@ void LocalRepositoryWidget::onHistorySelectionChanged()
               .arg(QLocale().toString(when, QLocale::LongFormat));
     text += message;
     historyDetail_->setPlainText(text);
+
+    // Kick off the diff request for this commit. The result lands in
+    // setCommitDiff(), which populates the file list and the diff view.
+    if (id != currentCommitSha_) {
+        currentCommitSha_ = id;
+        currentCommitFiles_.clear();
+        if (commitFilesList_) commitFilesList_->clear();
+        if (commitDiffView_)  commitDiffView_->setLoading(id);
+        if (!path_.isEmpty()) Q_EMIT commitDiffRequested(path_, id);
+    }
+}
+
+void LocalRepositoryWidget::onCommitFileSelectionChanged()
+{
+    if (!commitDiffView_ || !commitFilesList_) return;
+    const auto sel = commitFilesList_->selectedItems();
+    if (sel.isEmpty()) {
+        commitDiffView_->clear();
+        return;
+    }
+    // Each item carries the index into currentCommitFiles_ — fast lookup
+    // and avoids a name search.
+    const int idx = sel.first()->data(Qt::UserRole + 1).toInt();
+    if (idx < 0 || idx >= static_cast<int>(currentCommitFiles_.size())) {
+        commitDiffView_->clear();
+        return;
+    }
+    commitDiffView_->setDiff(currentCommitFiles_[idx]);
 }
 
 void LocalRepositoryWidget::onAddRemoteClicked()
@@ -778,6 +919,296 @@ void LocalRepositoryWidget::onPublishToGitHubClicked()
     Q_EMIT publishToGitHubRequested(path_);
 }
 
+void LocalRepositoryWidget::onChangesSelectionChanged()
+{
+    requestDiffForSelection();
+}
+
+void LocalRepositoryWidget::onWatchedPathChanged()
+{
+    // Re-arm the debouncer. Multiple rapid hits (e.g. saving 50 files
+    // from an editor) collapse into a single refresh after the timer
+    // settles — see autoRefreshTimer_'s 300ms interval.
+    autoRefreshTimer_->start();
+}
+
+void LocalRepositoryWidget::onAutoRefreshTimeout()
+{
+    if (path_.isEmpty()) return;
+    // The watcher unwatches deleted files automatically (Linux quirk
+    // when an editor saves with rename-replace). Re-add them so we
+    // keep getting events.
+    setupWatcher();
+    Q_EMIT refreshRequested(path_);
+}
+
+// ----- Branch picker -------------------------------------------------------
+
+void LocalRepositoryWidget::setBranches(
+    const std::vector<ghm::git::BranchInfo>& branches)
+{
+    branchInfos_ = branches;
+
+    // Refresh the button caption: branch name + ahead/behind arrows
+    // for the current branch (if known). Format mirrors how shells like
+    // starship/p10k display this info.
+    QString caption = branch_.isEmpty() ? QStringLiteral("(unborn)") : branch_;
+    if (branch_.startsWith(QLatin1Char('('))) {
+        // unborn / detached — no branch info to enrich with
+        branchButton_->setText(caption);
+        return;
+    }
+    for (const auto& b : branches) {
+        if (b.isCurrent) {
+            QStringList parts;
+            parts << caption;
+            if (b.hasUpstream) {
+                if (b.ahead  > 0) parts << QStringLiteral("↑%1").arg(b.ahead);
+                if (b.behind > 0) parts << QStringLiteral("↓%1").arg(b.behind);
+            } else {
+                parts << QStringLiteral("(no upstream)");
+            }
+            caption = parts.join(QStringLiteral(" "));
+            break;
+        }
+    }
+    branchButton_->setText(caption + QStringLiteral("  ▾"));
+}
+
+void LocalRepositoryWidget::onBranchButtonClicked()
+{
+    // Build a fresh popup every time so external branch changes
+    // (e.g. user ran `git branch foo` from a terminal) show up
+    // without requiring a separate Refresh action.
+    if (path_.isEmpty() || !isRepository_) return;
+
+    QMenu menu(this);
+    menu.setSeparatorsCollapsible(false);
+
+    if (branchInfos_.empty()) {
+        auto* none = menu.addAction(tr("(no branches yet — make a commit first)"));
+        none->setEnabled(false);
+    } else {
+        // Branches are pre-sorted (current first, then alphabetical).
+        for (const auto& b : branchInfos_) {
+            QString label = b.name;
+            if (b.hasUpstream) {
+                QStringList annotations;
+                if (b.ahead  > 0) annotations << QStringLiteral("↑%1").arg(b.ahead);
+                if (b.behind > 0) annotations << QStringLiteral("↓%1").arg(b.behind);
+                if (!annotations.isEmpty()) {
+                    label += QStringLiteral("    ") + annotations.join(QLatin1Char(' '));
+                }
+            }
+            QAction* act = menu.addAction(label);
+            act->setCheckable(true);
+            act->setChecked(b.isCurrent);
+            act->setData(b.name);
+            // The current branch can't be checked-out into itself, but
+            // we still show it in the menu for orientation.
+            if (b.isCurrent) {
+                act->setEnabled(false);
+                QFont f = act->font();
+                f.setBold(true);
+                act->setFont(f);
+            }
+        }
+    }
+
+    menu.addSeparator();
+    QAction* createAct = menu.addAction(tr("Create new branch…"));
+    QAction* deleteAct = menu.addAction(tr("Delete branch…"));
+
+    // Disabling delete when there's nothing to delete (only the current
+    // branch exists, or the repo is unborn) keeps the menu honest.
+    bool hasDeletable = false;
+    for (const auto& b : branchInfos_) {
+        if (!b.isCurrent) { hasDeletable = true; break; }
+    }
+    deleteAct->setEnabled(hasDeletable);
+
+    QAction* picked = menu.exec(branchButton_->mapToGlobal(
+        QPoint(0, branchButton_->height())));
+    if (!picked) return;
+
+    if (picked == createAct) {
+        Q_EMIT branchCreateRequested(path_);
+        return;
+    }
+    if (picked == deleteAct) {
+        // Build a quick chooser over the deletable branches. If only
+        // one is deletable, skip straight to it.
+        QStringList options;
+        for (const auto& b : branchInfos_) {
+            if (!b.isCurrent) options << b.name;
+        }
+        if (options.isEmpty()) return;
+
+        QString chosen;
+        if (options.size() == 1) {
+            chosen = options.first();
+        } else {
+            // Sub-menu UX: show a second QMenu of deletable branches.
+            QMenu sub(this);
+            for (const auto& n : options) sub.addAction(n);
+            QAction* p2 = sub.exec(QCursor::pos());
+            if (!p2) return;
+            chosen = p2->text();
+        }
+        Q_EMIT branchDeleteRequested(path_, chosen);
+        return;
+    }
+
+    // Otherwise it's a branch-switch action.
+    const QString target = picked->data().toString();
+    if (!target.isEmpty()) {
+        Q_EMIT branchSwitchRequested(path_, target);
+    }
+}
+
+// ----- Diff plumbing -------------------------------------------------------
+
+void LocalRepositoryWidget::setFileDiff(const QString& repoRelPath,
+                                        const ghm::git::FileDiff& diff,
+                                        const QString& error)
+{
+    if (!diffView_) return;
+    // Filter stale results: if the user already moved on to another
+    // file, the previous request's reply would otherwise overwrite the
+    // newer diff with old content.
+    if (repoRelPath != currentDiffPath_) return;
+
+    if (!error.isEmpty()) {
+        diffView_->setDiff({}, error);
+        return;
+    }
+    diffView_->setDiff(diff);
+}
+
+void LocalRepositoryWidget::setCommitDiff(
+    const QString&                          sha,
+    const std::vector<ghm::git::FileDiff>&  files,
+    const QString&                          error)
+{
+    // Filter stale: user moved on to a different commit before this
+    // one came back. Drop the result silently.
+    if (sha != currentCommitSha_) return;
+    if (!commitFilesList_ || !commitDiffView_) return;
+
+    commitFilesList_->clear();
+    currentCommitFiles_ = files;
+
+    if (!error.isEmpty()) {
+        commitDiffView_->setDiff({}, error);
+        return;
+    }
+    if (files.empty()) {
+        // Empty commit (rare but legal — `git commit --allow-empty`)
+        // or a merge whose first parent is identical.
+        commitDiffView_->setDiff({});  // shows the "no changes" placeholder
+        return;
+    }
+
+    // Build the file list — same prefix vocabulary as the Changes tab
+    // ([A] added, [M] modified, [D] deleted, [R] renamed, ...) for
+    // visual consistency between the two contexts.
+    for (size_t i = 0; i < files.size(); ++i) {
+        const auto& fd = files[i];
+        QString line;
+        line.reserve(fd.path.size() + 16);
+        line += QLatin1Char('[');
+        line += fd.status;
+        line += QStringLiteral("]  ");
+        line += fd.path;
+        if (!fd.oldPath.isEmpty() && fd.oldPath != fd.path) {
+            line += QStringLiteral("  ← ");
+            line += fd.oldPath;
+        }
+        QStringList summary;
+        if (fd.additions > 0) summary << QStringLiteral("+%1").arg(fd.additions);
+        if (fd.deletions > 0) summary << QStringLiteral("-%1").arg(fd.deletions);
+        if (!summary.isEmpty()) {
+            line += QStringLiteral("    ") + summary.join(QLatin1Char(' '));
+        }
+
+        auto* item = new QListWidgetItem(line, commitFilesList_);
+        item->setData(Qt::UserRole + 1, static_cast<int>(i));
+    }
+
+    // Auto-select the first file so the diff pane shows something
+    // immediately rather than the placeholder. Saves a click.
+    if (commitFilesList_->count() > 0) {
+        commitFilesList_->setCurrentRow(0);
+    }
+}
+
+void LocalRepositoryWidget::requestDiffForSelection()
+{
+    if (!diffView_ || !changesList_) return;
+    if (path_.isEmpty() || !isRepository_) {
+        diffView_->clear();
+        currentDiffPath_.clear();
+        return;
+    }
+    // Only render the diff for a single-selection. Multi-select is for
+    // bulk stage/unstage operations; showing the diff of "one of them"
+    // would be misleading. We show the placeholder instead.
+    const auto sel = changesList_->selectedItems();
+    if (sel.size() != 1) {
+        diffView_->clear();
+        currentDiffPath_.clear();
+        return;
+    }
+
+    const QString repoRelPath = sel.first()->data(Qt::UserRole + 1).toString();
+    if (repoRelPath.isEmpty()) {
+        diffView_->clear();
+        currentDiffPath_.clear();
+        return;
+    }
+
+    currentDiffPath_ = repoRelPath;
+    diffView_->setLoading(repoRelPath);
+    // HeadToWorkdir gives users the most natural "what will my next
+    // commit look like, plus what's still loose in the worktree" view.
+    Q_EMIT diffRequested(path_, repoRelPath, ghm::git::DiffScope::HeadToWorkdir);
+}
+
+// ----- Auto-refresh watcher ------------------------------------------------
+
+void LocalRepositoryWidget::setupWatcher()
+{
+    teardownWatcher();
+    if (path_.isEmpty()) return;
+
+    QStringList toWatch;
+    // Working-tree root — catches new files, dir-level renames, etc.
+    if (QDir(path_).exists()) toWatch << path_;
+
+    // .git internals: HEAD changes on branch switch / commit; index
+    // changes on stage/unstage. Tags and refs aren't crucial for the
+    // Changes view — skipping them keeps the watch list short on
+    // platforms where it has limits (Linux inotify default is 8192).
+    const QString gitDir = QDir(path_).filePath(QStringLiteral(".git"));
+    if (QFileInfo(gitDir).isDir()) {
+        const QString headPath  = QDir(gitDir).filePath(QStringLiteral("HEAD"));
+        const QString indexPath = QDir(gitDir).filePath(QStringLiteral("index"));
+        if (QFileInfo::exists(headPath))  toWatch << headPath;
+        if (QFileInfo::exists(indexPath)) toWatch << indexPath;
+    }
+    // QFileSystemWatcher::addPaths returns the list it failed to add;
+    // ignore — non-existent paths just aren't watched.
+    if (!toWatch.isEmpty()) watcher_->addPaths(toWatch);
+}
+
+void LocalRepositoryWidget::teardownWatcher()
+{
+    const auto files = watcher_->files();
+    if (!files.isEmpty()) watcher_->removePaths(files);
+    const auto dirs  = watcher_->directories();
+    if (!dirs.isEmpty())  watcher_->removePaths(dirs);
+}
+
 // ----- Helpers -------------------------------------------------------------
 
 QString LocalRepositoryWidget::selectedRemote() const
@@ -801,6 +1232,15 @@ QStringList LocalRepositoryWidget::selectedChangedPaths(bool /*stagedOnly*/,
 void LocalRepositoryWidget::rebuildChangesList(
     const std::vector<ghm::git::StatusEntry>& entries)
 {
+    // Remember which file was selected so we can re-apply the selection
+    // after the rebuild — otherwise an auto-refresh would scrub the
+    // diff panel back to the placeholder every time.
+    QString prevSelected;
+    if (auto sel = changesList_->selectedItems(); sel.size() == 1) {
+        prevSelected = sel.first()->data(kPathRole).toString();
+    }
+
+    QSignalBlocker blocker(changesList_);
     changesList_->clear();
     if (entries.empty()) {
         auto* item = new QListWidgetItem(
@@ -825,17 +1265,26 @@ void LocalRepositoryWidget::rebuildChangesList(
     std::sort(untracked.begin(),  untracked.end(),  byPath);
     std::sort(conflicted.begin(), conflicted.end(), byPath);
 
+    QListWidgetItem* toReselect = nullptr;
     auto addAll = [&](const auto& vec) {
         for (const auto* e : vec) {
             auto* item = new QListWidgetItem(formatStatusItem(*e), changesList_);
             item->setData(kPathRole, e->path);
             item->setToolTip(humanStatusTooltip(*e));
+            if (!prevSelected.isEmpty() && e->path == prevSelected) {
+                toReselect = item;
+            }
         }
     };
     addAll(conflicted);
     addAll(staged);
     addAll(unstaged);
     addAll(untracked);
+
+    if (toReselect) {
+        changesList_->setCurrentItem(toReselect);
+        toReselect->setSelected(true);
+    }
 }
 
 void LocalRepositoryWidget::rebuildRemotesList(

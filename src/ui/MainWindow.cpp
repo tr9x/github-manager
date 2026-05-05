@@ -5,6 +5,8 @@
 #include "ui/IdentityDialog.h"
 #include "ui/AddRemoteDialog.h"
 #include "ui/PublishToGitHubDialog.h"
+#include "ui/SupportDialog.h"
+#include "ui/CreateBranchDialog.h"
 #include "ui/RepositoryListWidget.h"
 #include "ui/RepositoryDetailWidget.h"
 #include "ui/LocalRepositoryWidget.h"
@@ -20,6 +22,7 @@
 #include <QToolBar>
 #include <QMenuBar>
 #include <QAction>
+#include <QActionGroup>
 #include <QLabel>
 #include <QProgressBar>
 #include <QMessageBox>
@@ -142,6 +145,25 @@ void MainWindow::buildActions()
     accountMenu->addAction(refreshAction_);
     accountMenu->addAction(logoutAction_);
 
+    // Settings → Language. Languages are exclusive radio actions whose
+    // checkmark reflects the currently-installed translation. Picking a
+    // different one persists the choice and prompts for a restart.
+    auto* settingsMenu = menuBar()->addMenu(tr("&Settings"));
+    auto* langMenu     = settingsMenu->addMenu(tr("&Language"));
+    auto* langGroup    = new QActionGroup(this);
+    langGroup->setExclusive(true);
+    const QString currentLang = settings_->language();
+    for (const QString& code : ghm::core::Settings::supportedLanguages()) {
+        auto* act = langMenu->addAction(
+            ghm::core::Settings::languageDisplayName(code));
+        act->setCheckable(true);
+        act->setChecked(code == currentLang);
+        act->setData(code);
+        langGroup->addAction(act);
+        connect(act, &QAction::triggered, this,
+                [this, code] { onLanguageChosen(code); });
+    }
+
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
     auto* aboutAct = helpMenu->addAction(tr("&About"));
     connect(aboutAct, &QAction::triggered, this, [this] {
@@ -152,6 +174,10 @@ void MainWindow::buildActions()
                "<p>Built with Qt 6, libgit2 and libsecret.</p>")
                 .arg(QString::fromLatin1(GHM_VERSION)));
     });
+    helpMenu->addSeparator();
+    auto* supportAct = helpMenu->addAction(tr("&Support / Donate…"));
+    connect(supportAct, &QAction::triggered,
+            this, &MainWindow::onShowSupportDialog);
 }
 
 void MainWindow::wireSignals()
@@ -226,6 +252,16 @@ void MainWindow::wireSignals()
             this, &MainWindow::onLocalRefreshRequested);
     connect(localDetail_, &LocalRepositoryWidget::historyRequested,
             this, &MainWindow::onLocalHistoryRequested);
+    connect(localDetail_, &LocalRepositoryWidget::diffRequested,
+            this, &MainWindow::onLocalDiffRequested);
+    connect(localDetail_, &LocalRepositoryWidget::commitDiffRequested,
+            this, &MainWindow::onLocalCommitDiffRequested);
+    connect(localDetail_, &LocalRepositoryWidget::branchSwitchRequested,
+            this, &MainWindow::onLocalBranchSwitchRequested);
+    connect(localDetail_, &LocalRepositoryWidget::branchCreateRequested,
+            this, &MainWindow::onLocalBranchCreateRequested);
+    connect(localDetail_, &LocalRepositoryWidget::branchDeleteRequested,
+            this, &MainWindow::onLocalBranchDeleteRequested);
     connect(localDetail_, &LocalRepositoryWidget::editIdentityRequested,
             this, &MainWindow::onEditIdentityRequested);
 
@@ -258,6 +294,16 @@ void MainWindow::wireSignals()
             this, &MainWindow::onCommitFinished);
     connect(worker_, &ghm::git::GitWorker::historyReady,
             this, &MainWindow::onHistoryReady);
+    connect(worker_, &ghm::git::GitWorker::fileDiffReady,
+            this, &MainWindow::onFileDiffReady);
+    connect(worker_, &ghm::git::GitWorker::commitDiffReady,
+            this, &MainWindow::onCommitDiffReady);
+    connect(worker_, &ghm::git::GitWorker::branchInfosReady,
+            this, &MainWindow::onBranchInfosReady);
+    connect(worker_, &ghm::git::GitWorker::branchCreated,
+            this, &MainWindow::onBranchCreated);
+    connect(worker_, &ghm::git::GitWorker::branchDeleted,
+            this, &MainWindow::onBranchDeleted);
     connect(worker_, &ghm::git::GitWorker::remoteOpFinished,
             this, &MainWindow::onRemoteOpFinished);
 }
@@ -596,10 +642,18 @@ void MainWindow::onBranchSwitched(bool ok, const QString& localPath,
                                   const QString& branch, const QString& error)
 {
     setBusy(false);
+    localDetail_->setBusy(false);
     if (!ok) QMessageBox::warning(this, tr("Branch switch failed"), error);
     else     setStatus(tr("Now on %1").arg(branch), 4000);
-    worker_->refreshStatus(localPath);
-    worker_->listBranches(localPath);
+
+    if (activeLocalPath_ == localPath) {
+        worker_->refreshLocalState(localPath);
+        worker_->listBranchInfos(localPath);
+    } else {
+        // GitHub-clone view: reuse the old per-status-summary path.
+        worker_->refreshStatus(localPath);
+        worker_->listBranches(localPath);
+    }
 }
 
 void MainWindow::onBranchesReady(const QString& localPath,
@@ -655,6 +709,7 @@ void MainWindow::onLocalFolderActivated(const QString& path)
     localDetail_->setFolder(path);
     pushIdentityToWidget();
     worker_->refreshLocalState(path);
+    worker_->listBranchInfos(path);
 }
 
 void MainWindow::onRemoveLocalFolderRequested(const QString& path)
@@ -760,12 +815,169 @@ void MainWindow::onLocalRefreshRequested(const QString& path)
 {
     if (path.isEmpty()) return;
     worker_->refreshLocalState(path);
+    worker_->listBranchInfos(path);
 }
 
 void MainWindow::onLocalHistoryRequested(const QString& path)
 {
     if (path.isEmpty()) return;
     worker_->loadHistory(path, /*maxCount*/ 200);
+}
+
+void MainWindow::onLocalDiffRequested(const QString& path,
+                                      const QString& repoRelPath,
+                                      ghm::git::DiffScope scope)
+{
+    if (path.isEmpty() || repoRelPath.isEmpty()) return;
+    worker_->loadFileDiff(path, repoRelPath, scope);
+}
+
+void MainWindow::onLocalCommitDiffRequested(const QString& path, const QString& sha)
+{
+    if (path.isEmpty() || sha.isEmpty()) return;
+    worker_->loadCommitDiff(path, sha);
+}
+
+void MainWindow::onCommitDiffReady(
+    const QString&                          path,
+    const QString&                          sha,
+    const std::vector<ghm::git::FileDiff>&  files,
+    const QString&                          error)
+{
+    // Late results from a previous folder shouldn't leak into the
+    // currently-active one's UI.
+    if (path != activeLocalPath_) return;
+    localDetail_->setCommitDiff(sha, files, error);
+}
+
+// ----- Branch management ----------------------------------------------
+
+void MainWindow::onLocalBranchSwitchRequested(const QString& path,
+                                              const QString& branch)
+{
+    if (path.isEmpty() || branch.isEmpty()) return;
+    setBusy(true, tr("Switching to %1…").arg(branch));
+    localDetail_->setBusy(true);
+    worker_->switchBranch(path, branch);
+}
+
+void MainWindow::onLocalBranchCreateRequested(const QString& path)
+{
+    if (path.isEmpty()) return;
+
+    // Pull the current branch + existing names off the worker via a
+    // fresh sync call. We could cache them in MainWindow, but since
+    // branches change in lots of places (init, commit, remote ops),
+    // re-fetching keeps the dialog honest without bookkeeping.
+    ghm::git::GitResult err;
+    const QString currentName = worker_->handler().currentBranch(path, &err);
+    std::vector<ghm::git::BranchInfo> infos;
+    (void)worker_->handler().listLocalBranches(path, infos);
+    QStringList existing;
+    for (const auto& b : infos) existing << b.name;
+
+    CreateBranchDialog dlg(currentName, existing, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    setBusy(true, tr("Creating branch %1…").arg(dlg.name()));
+    localDetail_->setBusy(true);
+    worker_->createBranch(path, dlg.name(), dlg.checkoutAfter());
+}
+
+void MainWindow::onLocalBranchDeleteRequested(const QString& path,
+                                              const QString& branch)
+{
+    if (path.isEmpty() || branch.isEmpty()) return;
+
+    // First-pass non-force delete. If libgit2 says the branch isn't
+    // merged into HEAD, we get a clear error back via branchDeleted
+    // and re-prompt with a force-delete confirmation.
+    auto reply = QMessageBox::question(this, tr("Delete branch"),
+        tr("Delete the local branch <b>%1</b>?<br><br>"
+           "This is a local-only operation; nothing on GitHub is affected.")
+            .arg(branch.toHtmlEscaped()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    setBusy(true, tr("Deleting branch %1…").arg(branch));
+    localDetail_->setBusy(true);
+    worker_->deleteBranch(path, branch, /*force*/ false);
+}
+
+void MainWindow::onBranchInfosReady(
+    const QString& path,
+    const std::vector<ghm::git::BranchInfo>& branches)
+{
+    if (path != activeLocalPath_) return;
+    localDetail_->setBranches(branches);
+}
+
+void MainWindow::onBranchCreated(bool ok, const QString& path,
+                                 const QString& name, const QString& error)
+{
+    setBusy(false);
+    localDetail_->setBusy(false);
+    if (!ok) {
+        QMessageBox::warning(this, tr("Create branch failed"), error);
+    } else {
+        setStatus(tr("Created branch %1.").arg(name), 4000);
+    }
+    if (activeLocalPath_ == path) {
+        // refreshLocalState pokazuje stan plików; listBranchInfos
+        // odświeża popup z gałęziami.
+        worker_->refreshLocalState(path);
+        worker_->listBranchInfos(path);
+    }
+}
+
+void MainWindow::onBranchDeleted(bool ok, const QString& path,
+                                 const QString& name, const QString& error)
+{
+    setBusy(false);
+    localDetail_->setBusy(false);
+
+    if (!ok) {
+        // Detect "not merged" failure and offer force-delete. Our
+        // GitHandler emits a deterministic message starting with
+        // "Branch '...' has N commit(s) not merged" — match against
+        // that prefix.
+        if (error.contains(QStringLiteral("not merged"))) {
+            const auto reply = QMessageBox::warning(this,
+                tr("Branch is not merged"),
+                tr("<b>%1</b> contains commits that aren't reachable from "
+                   "your current branch.<br><br>%2<br><br>"
+                   "Force-delete anyway? <b>The unique commits will be lost</b> "
+                   "unless they're referenced from another branch.")
+                    .arg(name.toHtmlEscaped(), error.toHtmlEscaped()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes) {
+                setBusy(true, tr("Force-deleting branch %1…").arg(name));
+                localDetail_->setBusy(true);
+                worker_->deleteBranch(path, name, /*force*/ true);
+                return;
+            }
+        } else {
+            QMessageBox::warning(this, tr("Delete branch failed"), error);
+        }
+    } else {
+        setStatus(tr("Deleted branch %1.").arg(name), 4000);
+    }
+
+    if (activeLocalPath_ == path) {
+        worker_->refreshLocalState(path);
+        worker_->listBranchInfos(path);
+    }
+}
+
+void MainWindow::onFileDiffReady(const QString& path,
+                                 const QString& repoRelPath,
+                                 const ghm::git::FileDiff& diff,
+                                 const QString& error)
+{
+    // Late results from a previous folder shouldn't leak into the
+    // currently-active one's UI.
+    if (path != activeLocalPath_) return;
+    localDetail_->setFileDiff(repoRelPath, diff, error);
 }
 
 void MainWindow::onPublishToGitHubRequested(const QString& path)
@@ -1023,6 +1235,29 @@ void MainWindow::onRemoteOpFinished(bool ok, const QString& path, const QString&
 
     // Plain manual remote add/remove from the Remotes tab.
     if (activeLocalPath_ == path) worker_->refreshLocalState(path);
+}
+
+// ----- App-level UI --------------------------------------------------------
+
+void MainWindow::onLanguageChosen(const QString& code)
+{
+    if (code.isEmpty() || code == settings_->language()) return;
+
+    settings_->setLanguage(code);
+
+    // Hot-swapping QTranslators in a running Qt app is fiddly: every
+    // hand-written widget would have to override changeEvent() and
+    // re-translate its strings. Rather than ship a half-translated UI
+    // until something is fixed, we tell the user to restart and let the
+    // next launch come up cleanly in the new language.
+    QMessageBox::information(this, tr("Language changed"),
+        tr("Restart the application to apply the new language."));
+}
+
+void MainWindow::onShowSupportDialog()
+{
+    SupportDialog dlg(this);
+    dlg.exec();
 }
 
 } // namespace ghm::ui

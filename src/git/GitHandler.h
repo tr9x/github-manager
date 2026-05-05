@@ -80,6 +80,62 @@ struct RemoteInfo {
     QString pushUrl;        // empty if same as url
 };
 
+// Per-branch metadata. Used by the branch picker so it can display
+// the upstream relationship and ahead/behind counts inline.
+struct BranchInfo {
+    QString name;             // short name, e.g. "master"
+    bool    isCurrent{false}; // checked out HEAD points here
+    QString upstreamName;     // "origin/master" or empty
+    int     ahead{0};         // commits this branch has that upstream doesn't
+    int     behind{0};        // commits upstream has that this branch doesn't
+    bool    hasUpstream{false};
+};
+
+// One line inside a diff hunk. `origin` mirrors libgit2's classification:
+//   ' '  context (unchanged)
+//   '+'  added line (present in new, absent in old)
+//   '-'  removed line (present in old, absent in new)
+//   '\n' newline-at-EOF marker (rare, can be ignored by UI)
+// `oldLineNo` and `newLineNo` are 1-based; -1 when the line doesn't
+// exist on that side.
+struct DiffLine {
+    char    origin{' '};
+    int     oldLineNo{-1};
+    int     newLineNo{-1};
+    QString content;        // text without origin char or trailing \n
+};
+
+struct DiffHunk {
+    QString header;         // raw "@@ -1,3 +1,5 @@ funcName" line
+    int     oldStart{0};
+    int     oldLines{0};
+    int     newStart{0};
+    int     newLines{0};
+    std::vector<DiffLine> lines;
+};
+
+// Full diff for a single file. Empty hunks + binary == binary file.
+struct FileDiff {
+    QString path;           // current path
+    QString oldPath;        // for renames; otherwise empty
+    char    status{' '};    // 'A','M','D','R','T','U','?'
+    bool    isBinary{false};
+    bool    isUntracked{false};
+    int     additions{0};
+    int     deletions{0};
+    std::vector<DiffHunk> hunks;
+};
+
+// What we're diffing against. For the typical Changes-tab use-case
+// pass HeadToWorkdir — that combines staged + unstaged changes the
+// way `git diff HEAD` does, and with the right flags also shows
+// untracked file contents.
+enum class DiffScope {
+    HeadToWorkdir,    // git diff HEAD (combined view)
+    HeadToIndex,      // git diff --cached  (staged only)
+    IndexToWorkdir,   // git diff           (unstaged only, plus untracked content)
+};
+
 // Optional progress callback for long-running operations.
 // `phase` is a short label ("Receiving objects", "Resolving deltas").
 // `current`/`total` describe units appropriate to the phase.
@@ -123,7 +179,27 @@ public:
     QString currentBranch(const QString& localPath, GitResult* outErr = nullptr);
     QStringList localBranches(const QString& localPath, GitResult* outErr = nullptr);
 
+    // Like localBranches() but returns full metadata: upstream
+    // relationship and ahead/behind counts. Used by the branch picker.
+    GitResult listLocalBranches(const QString& localPath,
+                                std::vector<BranchInfo>& out);
+
     GitResult checkoutBranch(const QString& localPath, const QString& branch);
+
+    // Creates a local branch named `name` pointing at the current HEAD
+    // (or any ref-like spec if needed later — but for the UI we only
+    // ever branch from HEAD). Pass `checkoutAfter=true` to immediately
+    // switch to the new branch.
+    GitResult createBranch(const QString& localPath,
+                           const QString& name,
+                           bool           checkoutAfter);
+
+    // Deletes a local branch. Refuses to delete the currently-checked-
+    // out branch. With `force=false`, also refuses if the branch isn't
+    // merged into HEAD (mirrors `git branch -d` vs `-D`).
+    GitResult deleteBranch(const QString& localPath,
+                           const QString& name,
+                           bool           force);
 
     StatusSummary status(const QString& localPath, GitResult* outErr = nullptr);
 
@@ -162,6 +238,28 @@ public:
     // `git log` — most recent first, capped at `maxCount` (0 = no cap).
     GitResult log(const QString& localPath, int maxCount,
                   std::vector<CommitInfo>& out);
+
+    // Computes the diff for a single file, in the chosen scope. The
+    // path is repository-relative (e.g. "src/foo.cpp"). When the scope
+    // is HeadToWorkdir, untracked files are included with their full
+    // content rendered as additions.
+    GitResult fileDiff(const QString& localPath,
+                       const QString& repoRelPath,
+                       DiffScope      scope,
+                       FileDiff&      out);
+
+    // Computes the diff a commit introduces — equivalent to `git show
+    // <sha>`. For a commit with one parent (the common case), this is
+    // diff(parent.tree, this.tree). For a root commit (no parent), it
+    // becomes diff(emptyTree, this.tree), so every file shows up as an
+    // addition.
+    //
+    // Each file changed by the commit becomes one FileDiff in `out`.
+    // Merge commits are diffed against their first parent, mirroring
+    // `git show` defaults — combined diffs (`-c`) aren't covered.
+    GitResult commitDiff(const QString& localPath,
+                         const QString& sha,
+                         std::vector<FileDiff>& out);
 
     // --- Remotes ------------------------------------------------------
 

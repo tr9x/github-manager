@@ -3,6 +3,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QDir>
+#include <QLocale>
 
 namespace ghm::core {
 
@@ -128,6 +129,49 @@ void Settings::setDefaultInitBranch(const QString& branch)
 {
     auto s = makeSettings();
     s.setValue(QStringLiteral("git/defaultInitBranch"), branch.trimmed());
+}
+
+// -- Language --------------------------------------------------------------
+
+QString Settings::language() const
+{
+    auto s = makeSettings();
+    const QString stored = s.value(QStringLiteral("ui/language")).toString();
+    if (!stored.isEmpty() && supportedLanguages().contains(stored)) {
+        return stored;
+    }
+    return defaultLanguage();
+}
+
+void Settings::setLanguage(const QString& code)
+{
+    auto s = makeSettings();
+    if (supportedLanguages().contains(code)) {
+        s.setValue(QStringLiteral("ui/language"), code);
+    }
+}
+
+QString Settings::defaultLanguage()
+{
+    // Pick Polish if the user's system locale is Polish; otherwise English.
+    // QLocale::system().name() returns "pl_PL", "en_US", etc.
+    const QString sys = QLocale::system().name();
+    if (sys.startsWith(QStringLiteral("pl"), Qt::CaseInsensitive)) {
+        return QStringLiteral("pl");
+    }
+    return QStringLiteral("en");
+}
+
+QStringList Settings::supportedLanguages()
+{
+    return { QStringLiteral("en"), QStringLiteral("pl") };
+}
+
+QString Settings::languageDisplayName(const QString& code)
+{
+    if (code == QLatin1String("pl")) return QStringLiteral("Polski");
+    if (code == QLatin1String("en")) return QStringLiteral("English");
+    return code;
 }
 
 // -- Window state ----------------------------------------------------------

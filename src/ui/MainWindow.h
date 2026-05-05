@@ -89,9 +89,21 @@ private Q_SLOTS:
                                     bool           setUpstream);
     void onLocalRefreshRequested   (const QString& path);
     void onLocalHistoryRequested   (const QString& path);
+    void onLocalDiffRequested      (const QString& path,
+                                    const QString& repoRelPath,
+                                    ghm::git::DiffScope scope);
+    void onLocalCommitDiffRequested(const QString& path, const QString& sha);
+    // Branch management on a local repo.
+    void onLocalBranchSwitchRequested(const QString& path, const QString& branch);
+    void onLocalBranchCreateRequested(const QString& path);
+    void onLocalBranchDeleteRequested(const QString& path, const QString& branch);
     void onPublishToGitHubRequested(const QString& path);
     void onRepositoryCreated       (const ghm::github::Repository& repo);
     void onEditIdentityRequested();
+
+    // -- App-level UI ---------------------------------------------------
+    void onLanguageChosen(const QString& code);
+    void onShowSupportDialog();
 
     // Worker callbacks for local flow.
     void onInitFinished(bool ok, const QString& path, const QString& error);
@@ -106,6 +118,20 @@ private Q_SLOTS:
                            const QString& sha, const QString& error);
     void onHistoryReady   (const QString& path,
                            const std::vector<ghm::git::CommitInfo>& commits);
+    void onFileDiffReady  (const QString& path,
+                           const QString& repoRelPath,
+                           const ghm::git::FileDiff& diff,
+                           const QString& error);
+    void onCommitDiffReady(const QString& path,
+                           const QString& sha,
+                           const std::vector<ghm::git::FileDiff>& files,
+                           const QString& error);
+    void onBranchInfosReady(const QString& path,
+                            const std::vector<ghm::git::BranchInfo>& branches);
+    void onBranchCreated  (bool ok, const QString& path,
+                           const QString& name, const QString& error);
+    void onBranchDeleted  (bool ok, const QString& path,
+                           const QString& name, const QString& error);
     void onRemoteOpFinished(bool ok, const QString& path, const QString& error);
 
 private:

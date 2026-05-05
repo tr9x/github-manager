@@ -47,6 +47,10 @@ GitWorker::GitWorker(QObject* parent) : QObject(parent)
     qRegisterMetaType<std::vector<ghm::git::StatusEntry>>("std::vector<ghm::git::StatusEntry>");
     qRegisterMetaType<std::vector<ghm::git::RemoteInfo>> ("std::vector<ghm::git::RemoteInfo>");
     qRegisterMetaType<std::vector<ghm::git::CommitInfo>> ("std::vector<ghm::git::CommitInfo>");
+    qRegisterMetaType<std::vector<ghm::git::BranchInfo>> ("std::vector<ghm::git::BranchInfo>");
+    qRegisterMetaType<ghm::git::FileDiff>                ("ghm::git::FileDiff");
+    qRegisterMetaType<std::vector<ghm::git::FileDiff>>   ("std::vector<ghm::git::FileDiff>");
+    qRegisterMetaType<ghm::git::DiffScope>               ("ghm::git::DiffScope");
 }
 
 GitWorker::~GitWorker() = default;
@@ -127,6 +131,45 @@ void GitWorker::listBranches(const QString& localPath)
     runAsync<QStringList>(this, std::move(task),
         [this, localPath](const QStringList& bs) {
             Q_EMIT branchesReady(localPath, bs);
+        });
+}
+
+void GitWorker::listBranchInfos(const QString& localPath)
+{
+    auto task = [this, localPath]() -> std::vector<BranchInfo> {
+        std::vector<BranchInfo> out;
+        (void)handler_.listLocalBranches(localPath, out);
+        return out;
+    };
+    runAsync<std::vector<BranchInfo>>(this, std::move(task),
+        [this, localPath](const std::vector<BranchInfo>& bs) {
+            Q_EMIT branchInfosReady(localPath, bs);
+        });
+}
+
+void GitWorker::createBranch(const QString& localPath,
+                             const QString& name,
+                             bool           checkoutAfter)
+{
+    auto task = [this, localPath, name, checkoutAfter]() -> GitResult {
+        return handler_.createBranch(localPath, name, checkoutAfter);
+    };
+    runAsync<GitResult>(this, std::move(task),
+        [this, localPath, name](const GitResult& r) {
+            Q_EMIT branchCreated(r.ok, localPath, name, r.error);
+        });
+}
+
+void GitWorker::deleteBranch(const QString& localPath,
+                             const QString& name,
+                             bool           force)
+{
+    auto task = [this, localPath, name, force]() -> GitResult {
+        return handler_.deleteBranch(localPath, name, force);
+    };
+    runAsync<GitResult>(this, std::move(task),
+        [this, localPath, name](const GitResult& r) {
+            Q_EMIT branchDeleted(r.ok, localPath, name, r.error);
         });
 }
 
@@ -236,6 +279,38 @@ void GitWorker::loadHistory(const QString& localPath, int maxCount)
     runAsync<std::vector<CommitInfo>>(this, std::move(task),
         [this, localPath](const std::vector<CommitInfo>& commits) {
             Q_EMIT historyReady(localPath, commits);
+        });
+}
+
+void GitWorker::loadFileDiff(const QString& localPath,
+                             const QString& repoRelPath,
+                             ghm::git::DiffScope scope)
+{
+    struct Out { FileDiff diff; QString error; };
+    auto task = [this, localPath, repoRelPath, scope]() -> Out {
+        Out o;
+        const auto r = handler_.fileDiff(localPath, repoRelPath, scope, o.diff);
+        if (!r.ok) o.error = r.error;
+        return o;
+    };
+    runAsync<Out>(this, std::move(task),
+        [this, localPath, repoRelPath](const Out& r) {
+            Q_EMIT fileDiffReady(localPath, repoRelPath, r.diff, r.error);
+        });
+}
+
+void GitWorker::loadCommitDiff(const QString& localPath, const QString& sha)
+{
+    struct Out { std::vector<FileDiff> files; QString error; };
+    auto task = [this, localPath, sha]() -> Out {
+        Out o;
+        const auto r = handler_.commitDiff(localPath, sha, o.files);
+        if (!r.ok) o.error = r.error;
+        return o;
+    };
+    runAsync<Out>(this, std::move(task),
+        [this, localPath, sha](const Out& r) {
+            Q_EMIT commitDiffReady(localPath, sha, r.files, r.error);
         });
 }
 

@@ -59,6 +59,8 @@ using CommitHandle    = GitHandle<git_commit,        git_commit_free>;
 using SignatureHandle = GitHandle<git_signature,     git_signature_free>;
 using RevwalkHandle   = GitHandle<git_revwalk,       git_revwalk_free>;
 using ConfigHandle    = GitHandle<git_config,        git_config_free>;
+using DiffHandle      = GitHandle<git_diff,          git_diff_free>;
+using PatchHandle     = GitHandle<git_patch,         git_patch_free>;
 
 // git_strarray needs its own free and is ALSO a value type, so we use a
 // scoped helper rather than the template.
@@ -199,6 +201,85 @@ StrArrayBuf makeStrArrayAll()
     out.bytes.push_back(QByteArrayLiteral("*"));
     out.rebuildFromBytes();
     return out;
+}
+
+// Pulls a single git_diff_delta out of a populated git_diff and turns
+// it into our FileDiff struct. Shared by fileDiff() (single-file
+// pathspec, picks first delta) and commitDiff() (no pathspec, called
+// once per delta in the loop).
+//
+// Returns false only on patch-creation failure for non-binary entries;
+// the caller can decide whether to skip or treat that as fatal. Empty
+// hunks for binary files are normal and return true.
+bool extractDelta(git_diff* diff, size_t index, FileDiff& out)
+{
+    const git_diff_delta* delta = git_diff_get_delta(diff, index);
+    if (!delta) return false;
+
+    switch (delta->status) {
+        case GIT_DELTA_ADDED:      out.status = 'A'; break;
+        case GIT_DELTA_DELETED:    out.status = 'D'; break;
+        case GIT_DELTA_MODIFIED:   out.status = 'M'; break;
+        case GIT_DELTA_RENAMED:    out.status = 'R'; break;
+        case GIT_DELTA_COPIED:     out.status = 'C'; break;
+        case GIT_DELTA_TYPECHANGE: out.status = 'T'; break;
+        case GIT_DELTA_UNTRACKED:  out.status = '?'; out.isUntracked = true; break;
+        case GIT_DELTA_CONFLICTED: out.status = 'U'; break;
+        default:                   out.status = '?'; break;
+    }
+    if (delta->old_file.path) out.oldPath = QString::fromUtf8(delta->old_file.path);
+    if (delta->new_file.path) out.path    = QString::fromUtf8(delta->new_file.path);
+
+    out.isBinary = (delta->flags & GIT_DIFF_FLAG_BINARY) != 0;
+    if (out.isBinary) {
+        // No hunks for binary files; libgit2 won't enumerate them.
+        return true;
+    }
+
+    PatchHandle patch;
+    if (git_patch_from_diff(patch.out(), diff, index) != 0) {
+        return false;
+    }
+
+    const size_t nHunks = git_patch_num_hunks(patch.get());
+    out.hunks.reserve(out.hunks.size() + nHunks);
+    for (size_t h = 0; h < nHunks; ++h) {
+        const git_diff_hunk* hRaw = nullptr;
+        size_t nLinesInHunk = 0;
+        if (git_patch_get_hunk(&hRaw, &nLinesInHunk, patch.get(), h) != 0) continue;
+
+        DiffHunk hunk;
+        hunk.oldStart = hRaw->old_start;
+        hunk.oldLines = hRaw->old_lines;
+        hunk.newStart = hRaw->new_start;
+        hunk.newLines = hRaw->new_lines;
+        hunk.header = QString::fromUtf8(hRaw->header,
+                                        static_cast<int>(hRaw->header_len)).trimmed();
+        hunk.lines.reserve(nLinesInHunk);
+
+        for (size_t l = 0; l < nLinesInHunk; ++l) {
+            const git_diff_line* lineRaw = nullptr;
+            if (git_patch_get_line_in_hunk(&lineRaw, patch.get(), h, l) != 0) continue;
+            if (!lineRaw) continue;
+
+            DiffLine line;
+            line.origin    = lineRaw->origin;
+            line.oldLineNo = lineRaw->old_lineno;
+            line.newLineNo = lineRaw->new_lineno;
+
+            int len = static_cast<int>(lineRaw->content_len);
+            if (len > 0 && lineRaw->content[len - 1] == '\n') --len;
+            if (len > 0 && lineRaw->content[len - 1] == '\r') --len;
+            line.content = QString::fromUtf8(lineRaw->content, len);
+
+            if      (line.origin == '+') ++out.additions;
+            else if (line.origin == '-') ++out.deletions;
+
+            hunk.lines.push_back(std::move(line));
+        }
+        out.hunks.push_back(std::move(hunk));
+    }
+    return true;
 }
 
 } // namespace
@@ -372,6 +453,180 @@ GitResult GitHandler::checkoutBranch(const QString& localPath, const QString& br
     rc = git_repository_set_head(repo.get(), refName.constData());
     if (rc != 0) return lastError(QStringLiteral("Set HEAD"), rc);
 
+    return GitResult::success();
+}
+
+GitResult GitHandler::listLocalBranches(const QString& localPath,
+                                        std::vector<BranchInfo>& out)
+{
+    out.clear();
+    RepoHandle repo;
+    if (auto rc = openRepo(localPath, repo); !rc.ok) return rc;
+
+    // Pre-resolve current branch so we can flag isCurrent in the loop.
+    QString currentName;
+    bool    headDetached = false;
+    {
+        ReferenceHandle head;
+        const int hrc = git_repository_head(head.out(), repo.get());
+        if (hrc == 0 && git_reference_is_branch(head.get()) == 1) {
+            const char* sh = git_reference_shorthand(head.get());
+            if (sh) currentName = QString::fromUtf8(sh);
+        } else if (hrc == 0 && git_repository_head_detached(repo.get()) == 1) {
+            headDetached = true;
+        }
+        // Unborn HEAD: currentName stays empty; branches still listed.
+    }
+
+    BranchIterH it;
+    int rc = git_branch_iterator_new(it.out(), repo.get(), GIT_BRANCH_LOCAL);
+    if (rc != 0) return lastError(QStringLiteral("Branch iterator"), rc);
+
+    git_reference* refRaw = nullptr;
+    git_branch_t   type;
+    while (git_branch_next(&refRaw, &type, it.get()) == 0) {
+        ReferenceHandle ref(refRaw);
+        const char* nameC = nullptr;
+        if (git_branch_name(&nameC, ref.get()) != 0 || !nameC) continue;
+
+        BranchInfo info;
+        info.name = QString::fromUtf8(nameC);
+        info.isCurrent = !headDetached && (info.name == currentName);
+
+        // Resolve upstream — most branches won't have one (e.g. local-only),
+        // and that's fine. git_branch_upstream returns ENOTFOUND in that case.
+        ReferenceHandle upstream;
+        if (git_branch_upstream(upstream.out(), ref.get()) == 0) {
+            info.hasUpstream = true;
+            const char* upName = nullptr;
+            if (git_branch_name(&upName, upstream.get()) == 0 && upName) {
+                info.upstreamName = QString::fromUtf8(upName);
+            }
+            const git_oid* localOid    = git_reference_target(ref.get());
+            const git_oid* upstreamOid = git_reference_target(upstream.get());
+            size_t ahead = 0, behind = 0;
+            if (localOid && upstreamOid &&
+                git_graph_ahead_behind(&ahead, &behind, repo.get(),
+                                       localOid, upstreamOid) == 0) {
+                info.ahead  = static_cast<int>(ahead);
+                info.behind = static_cast<int>(behind);
+            }
+        }
+        out.push_back(std::move(info));
+    }
+
+    // Sort: current first, then alphabetically. Predictable ordering
+    // matters for the picker — users learn where their branch lives.
+    std::sort(out.begin(), out.end(),
+              [](const BranchInfo& a, const BranchInfo& b) {
+        if (a.isCurrent != b.isCurrent) return a.isCurrent;
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+
+    return GitResult::success();
+}
+
+GitResult GitHandler::createBranch(const QString& localPath,
+                                   const QString& name,
+                                   bool           checkoutAfter)
+{
+    if (name.trimmed().isEmpty()) {
+        return GitResult::failure(QStringLiteral("Branch name is empty."));
+    }
+
+    RepoHandle repo;
+    if (auto rc = openRepo(localPath, repo); !rc.ok) return rc;
+
+    // Need a commit to branch from. Unborn HEAD (no commits yet) means
+    // there's nothing to create a branch off of — surface a helpful
+    // message instead of a cryptic libgit2 error code.
+    ReferenceHandle head;
+    int rc = git_repository_head(head.out(), repo.get());
+    if (rc == GIT_EUNBORNBRANCH || rc == GIT_ENOTFOUND) {
+        return GitResult::failure(
+            QStringLiteral("Cannot create a branch yet — make at least one commit first."));
+    }
+    if (rc != 0) return lastError(QStringLiteral("Resolve HEAD"), rc);
+
+    CommitHandle headCommit;
+    {
+        ObjectHandle peeled;
+        if (git_reference_peel(peeled.out(), head.get(), GIT_OBJECT_COMMIT) != 0) {
+            return lastError(QStringLiteral("Peel HEAD to commit"), -1);
+        }
+        const git_oid* oid = git_object_id(peeled.get());
+        if (git_commit_lookup(headCommit.out(), repo.get(), oid) != 0) {
+            return lastError(QStringLiteral("Lookup HEAD commit"), -1);
+        }
+    }
+
+    const QByteArray nameBytes = name.toUtf8();
+    ReferenceHandle newRef;
+    rc = git_branch_create(newRef.out(), repo.get(),
+                           nameBytes.constData(), headCommit.get(),
+                           /*force*/ 0);
+    if (rc != 0) return lastError(QStringLiteral("Create branch '%1'").arg(name), rc);
+
+    if (checkoutAfter) {
+        return checkoutBranch(localPath, name);
+    }
+    return GitResult::success();
+}
+
+GitResult GitHandler::deleteBranch(const QString& localPath,
+                                   const QString& name,
+                                   bool           force)
+{
+    RepoHandle repo;
+    if (auto rc = openRepo(localPath, repo); !rc.ok) return rc;
+
+    // Refuse to delete the current branch — there's no good UX for
+    // "where should HEAD go now". User must check out somewhere else
+    // first. Mirrors `git branch -d <currentBranch>`.
+    {
+        ReferenceHandle head;
+        if (git_repository_head(head.out(), repo.get()) == 0 &&
+            git_reference_is_branch(head.get()) == 1) {
+            const char* shorthand = git_reference_shorthand(head.get());
+            if (shorthand && QString::fromUtf8(shorthand) == name) {
+                return GitResult::failure(QStringLiteral(
+                    "Cannot delete the currently-checked-out branch. "
+                    "Switch to another branch first."));
+            }
+        }
+    }
+
+    ReferenceHandle ref;
+    const QByteArray nameBytes = name.toUtf8();
+    int rc = git_branch_lookup(ref.out(), repo.get(),
+                               nameBytes.constData(), GIT_BRANCH_LOCAL);
+    if (rc != 0) return lastError(QStringLiteral("Lookup branch '%1'").arg(name), rc);
+
+    if (!force) {
+        // Safety check: ensure the branch is fully reachable from HEAD.
+        // This is what `git branch -d` does — refuses to drop unique
+        // commits unless you opt in with -D.
+        ReferenceHandle head;
+        if (git_repository_head(head.out(), repo.get()) == 0) {
+            const git_oid* branchOid = git_reference_target(ref.get());
+            const git_oid* headOid   = git_reference_target(head.get());
+            if (branchOid && headOid) {
+                size_t ahead = 0, behind = 0;
+                if (git_graph_ahead_behind(&ahead, &behind, repo.get(),
+                                           branchOid, headOid) == 0) {
+                    if (ahead > 0) {
+                        return GitResult::failure(QStringLiteral(
+                            "Branch '%1' has %2 commit(s) not merged into HEAD. "
+                            "Use force-delete if you really want to drop them.")
+                            .arg(name).arg(ahead));
+                    }
+                }
+            }
+        }
+    }
+
+    rc = git_branch_delete(ref.get());
+    if (rc != 0) return lastError(QStringLiteral("Delete branch '%1'").arg(name), rc);
     return GitResult::success();
 }
 
@@ -730,6 +985,186 @@ GitResult GitHandler::log(const QString& localPath, int maxCount,
 
         out.push_back(std::move(info));
         ++count;
+    }
+    return GitResult::success();
+}
+
+GitResult GitHandler::fileDiff(const QString& localPath,
+                               const QString& repoRelPath,
+                               DiffScope      scope,
+                               FileDiff&      out)
+{
+    out = {};
+    out.path = repoRelPath;
+
+    if (repoRelPath.isEmpty()) {
+        return GitResult::failure(QStringLiteral("Empty path."));
+    }
+
+    RepoHandle repo;
+    if (auto rc = openRepo(localPath, repo); !rc.ok) return rc;
+
+    // Pathspec restricts the diff to a single file. The QByteArray
+    // backing storage must outlive the call.
+    const QByteArray pathBytes = repoRelPath.toUtf8();
+    const char* pathPtrs[] = { pathBytes.constData() };
+
+    git_diff_options dopts = GIT_DIFF_OPTIONS_INIT;
+    dopts.flags = GIT_DIFF_INCLUDE_UNTRACKED
+                | GIT_DIFF_RECURSE_UNTRACKED_DIRS
+                | GIT_DIFF_SHOW_UNTRACKED_CONTENT
+                | GIT_DIFF_INCLUDE_TYPECHANGE;
+    dopts.pathspec.strings = const_cast<char**>(pathPtrs);
+    dopts.pathspec.count   = 1;
+    dopts.context_lines    = 3;
+    dopts.interhunk_lines  = 1;
+
+    DiffHandle diff;
+
+    // Decide how to populate the diff based on scope. For scopes that
+    // need a HEAD tree, fall back gracefully when HEAD is unborn —
+    // there's nothing to diff against, so we treat everything as new.
+    bool unborn = false;
+    TreeHandle headTree;
+    {
+        ReferenceHandle head;
+        const int rc = git_repository_head(head.out(), repo.get());
+        if (rc == GIT_EUNBORNBRANCH || rc == GIT_ENOTFOUND) {
+            unborn = true;
+        } else if (rc != 0) {
+            return lastError(QStringLiteral("Resolve HEAD"), rc);
+        } else {
+            ObjectHandle peeled;
+            if (git_reference_peel(peeled.out(), head.get(), GIT_OBJECT_TREE) == 0) {
+                // Move ownership: peel returns a generic git_object*
+                // pointing at a tree; transfer it into headTree.
+                headTree = TreeHandle(reinterpret_cast<git_tree*>(peeled.p));
+                peeled.p = nullptr;
+            } else {
+                unborn = true;
+            }
+        }
+    }
+
+    int rc = 0;
+    if (scope == DiffScope::HeadToIndex) {
+        if (unborn) {
+            // No HEAD → nothing staged that isn't fully "new". Show
+            // index-to-workdir's "new file" entries instead.
+            rc = git_diff_index_to_workdir(diff.out(), repo.get(), nullptr, &dopts);
+        } else {
+            rc = git_diff_tree_to_index(diff.out(), repo.get(), headTree.get(),
+                                        nullptr, &dopts);
+        }
+    } else if (scope == DiffScope::IndexToWorkdir) {
+        rc = git_diff_index_to_workdir(diff.out(), repo.get(), nullptr, &dopts);
+    } else { // HeadToWorkdir (combined)
+        if (unborn) {
+            rc = git_diff_index_to_workdir(diff.out(), repo.get(), nullptr, &dopts);
+        } else {
+            rc = git_diff_tree_to_workdir_with_index(
+                diff.out(), repo.get(), headTree.get(), &dopts);
+        }
+    }
+    if (rc != 0) return lastError(QStringLiteral("Compute diff"), rc);
+
+    // Iterate deltas; with our pathspec there's typically 0 or 1.
+    const size_t nDeltas = git_diff_num_deltas(diff.get());
+    if (nDeltas == 0) {
+        // No diff for this file means it's unchanged in this scope.
+        out.status = ' ';
+        return GitResult::success();
+    }
+
+    // We only care about the first matching delta for our pathspec;
+    // extractDelta populates the rest.
+    extractDelta(diff.get(), 0, out);
+
+    return GitResult::success();
+}
+
+GitResult GitHandler::commitDiff(const QString& localPath,
+                                 const QString& sha,
+                                 std::vector<FileDiff>& out)
+{
+    out.clear();
+    if (sha.isEmpty()) {
+        return GitResult::failure(QStringLiteral("Empty commit SHA."));
+    }
+
+    RepoHandle repo;
+    if (auto rc = openRepo(localPath, repo); !rc.ok) return rc;
+
+    // Resolve the commit. We accept anything git_revparse_single takes
+    // (full SHA, abbrev, even refs), but the UI only ever passes full
+    // hex strings — we still go through revparse for convenience.
+    ObjectHandle commitObj;
+    {
+        const QByteArray sb = sha.toUtf8();
+        const int rc = git_revparse_single(commitObj.out(), repo.get(), sb.constData());
+        if (rc != 0) {
+            return lastError(QStringLiteral("Resolve commit %1").arg(sha), rc);
+        }
+    }
+
+    CommitHandle commit;
+    {
+        const git_oid* oid = git_object_id(commitObj.get());
+        if (git_commit_lookup(commit.out(), repo.get(), oid) != 0) {
+            return lastError(QStringLiteral("Lookup commit %1").arg(sha), -1);
+        }
+    }
+
+    // The commit's own tree.
+    TreeHandle thisTree;
+    if (git_commit_tree(thisTree.out(), commit.get()) != 0) {
+        return lastError(QStringLiteral("Read commit tree"), -1);
+    }
+
+    // Parent tree, if any. For a root commit there is none — we pass
+    // NULL to git_diff_tree_to_tree, which then returns "everything as
+    // additions" relative to an empty baseline, exactly what `git show`
+    // does for the first commit.
+    TreeHandle parentTree;
+    git_tree* parentTreePtr = nullptr;
+    const unsigned int parentCount = git_commit_parentcount(commit.get());
+    if (parentCount > 0) {
+        // Use the first parent. For merge commits this matches `git show`
+        // defaults; combined diff (-c) is intentionally out of scope.
+        CommitHandle parent;
+        if (git_commit_parent(parent.out(), commit.get(), 0) == 0) {
+            if (git_commit_tree(parentTree.out(), parent.get()) != 0) {
+                return lastError(QStringLiteral("Read parent tree"), -1);
+            }
+            parentTreePtr = parentTree.get();
+        }
+    }
+
+    git_diff_options dopts = GIT_DIFF_OPTIONS_INIT;
+    dopts.flags = GIT_DIFF_INCLUDE_TYPECHANGE;
+    dopts.context_lines    = 3;
+    dopts.interhunk_lines  = 1;
+
+    DiffHandle diff;
+    int rc = git_diff_tree_to_tree(diff.out(), repo.get(),
+                                   parentTreePtr, thisTree.get(), &dopts);
+    if (rc != 0) return lastError(QStringLiteral("Compute commit diff"), rc);
+
+    // Detect renames/copies — `git show` does this by default, makes
+    // diffs much more readable when files move.
+    git_diff_find_options fopts = GIT_DIFF_FIND_OPTIONS_INIT;
+    fopts.flags = GIT_DIFF_FIND_RENAMES | GIT_DIFF_FIND_COPIES;
+    // Ignore the return value: rename detection is best-effort, an
+    // error here just leaves the diff without rename annotations.
+    (void)git_diff_find_similar(diff.get(), &fopts);
+
+    const size_t nDeltas = git_diff_num_deltas(diff.get());
+    out.reserve(nDeltas);
+    for (size_t i = 0; i < nDeltas; ++i) {
+        FileDiff fd;
+        if (extractDelta(diff.get(), i, fd)) {
+            out.push_back(std::move(fd));
+        }
     }
     return GitResult::success();
 }

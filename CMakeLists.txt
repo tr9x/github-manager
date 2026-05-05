@@ -43,6 +43,8 @@ set(GHM_SOURCES
     ${GHM_SRC_DIR}/core/Settings.cpp
     ${GHM_SRC_DIR}/core/SecureStorage.h
     ${GHM_SRC_DIR}/core/SecureStorage.cpp
+    ${GHM_SRC_DIR}/core/Translator.h
+    ${GHM_SRC_DIR}/core/Translator.cpp
 
     ${GHM_SRC_DIR}/github/Repository.h
     ${GHM_SRC_DIR}/github/GitHubClient.h
@@ -65,6 +67,14 @@ set(GHM_SOURCES
     ${GHM_SRC_DIR}/ui/AddRemoteDialog.cpp
     ${GHM_SRC_DIR}/ui/PublishToGitHubDialog.h
     ${GHM_SRC_DIR}/ui/PublishToGitHubDialog.cpp
+    ${GHM_SRC_DIR}/ui/CreateBranchDialog.h
+    ${GHM_SRC_DIR}/ui/CreateBranchDialog.cpp
+    ${GHM_SRC_DIR}/ui/SupportDialog.h
+    ${GHM_SRC_DIR}/ui/SupportDialog.cpp
+    ${GHM_SRC_DIR}/ui/DiffViewWidget.h
+    ${GHM_SRC_DIR}/ui/DiffViewWidget.cpp
+    ${GHM_SRC_DIR}/ui/SearchBar.h
+    ${GHM_SRC_DIR}/ui/SearchBar.cpp
     ${GHM_SRC_DIR}/ui/RepositoryListWidget.h
     ${GHM_SRC_DIR}/ui/RepositoryListWidget.cpp
     ${GHM_SRC_DIR}/ui/RepositoryDetailWidget.h

@@ -55,6 +55,18 @@ public:
     QString defaultInitBranch() const;                   // default "master"
     void    setDefaultInitBranch(const QString& branch);
 
+    // -- Language --------------------------------------------------------
+    //
+    // Two-letter language code: "en" or "pl". When unset, defaultLanguage()
+    // is returned, which respects the system locale (Polish system → "pl").
+
+    QString language() const;
+    void    setLanguage(const QString& code);
+
+    static QString defaultLanguage();
+    static QStringList supportedLanguages();   // {"en", "pl"}
+    static QString    languageDisplayName(const QString& code);  // "English" / "Polski"
+
     // -- Window geometry / state ------------------------------------------
 
     QByteArray mainWindowGeometry() const;
