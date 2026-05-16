@@ -31,6 +31,7 @@ class QStackedWidget;
 class QListWidget;
 class QListWidgetItem;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QDialogButtonBox;
 
@@ -53,6 +54,12 @@ public:
     QString name()        const;
     QString description() const;
     bool    isPrivate()   const;
+
+    // License / gitignore templates from the combobox selections.
+    // Returns the GitHub "key" (e.g. "mit", "apache-2.0", "Python"),
+    // not the human-readable name. Empty when user picked "(none)".
+    QString licenseTemplate()   const;
+    QString gitignoreTemplate() const;
 
     // Mode::LinkExisting accessor
     ghm::github::Repository existingRepo() const;
@@ -89,6 +96,8 @@ private:
     QLineEdit*      descEdit_;
     QRadioButton*   publicRadio_;
     QRadioButton*   privateRadio_;
+    QComboBox*      licenseCombo_{nullptr};
+    QComboBox*      gitignoreCombo_{nullptr};
     QLabel*         createPreviewLabel_;
     QLabel*         createWarningLabel_;
 

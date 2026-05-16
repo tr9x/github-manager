@@ -1,4 +1,5 @@
 #include "ui/AddRemoteDialog.h"
+#include "ui/AddRemoteParser.h"
 
 #include <QFormLayout>
 #include <QVBoxLayout>
@@ -8,54 +9,15 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
-#include <QRegularExpression>
 
 namespace ghm::ui {
 
 namespace {
 
-struct Parsed {
-    QString name;
-    QString url;
-    bool    ok{false};
-};
-
-// Try to recognise either the full `git remote add <name> <url>` form
-// or a bare URL.
-Parsed parsePaste(const QString& raw)
-{
-    Parsed out;
-    QString s = raw.trimmed();
-    if (s.isEmpty()) return out;
-
-    // Strip an optional "$ " prompt prefix that some users copy from
-    // GitHub's instruction blocks.
-    if (s.startsWith(QLatin1String("$ "))) s.remove(0, 2);
-
-    // Form: git remote add <name> <url> [...]
-    static const QRegularExpression cmdRe(
-        QStringLiteral(R"(^\s*git\s+remote\s+add\s+(\S+)\s+(\S+)\s*$)"),
-        QRegularExpression::CaseInsensitiveOption);
-    if (auto m = cmdRe.match(s); m.hasMatch()) {
-        out.name = m.captured(1);
-        out.url  = m.captured(2);
-        out.ok   = true;
-        return out;
-    }
-
-    // Bare URL — anything that looks like a recognised git URL scheme.
-    static const QRegularExpression urlRe(
-        QStringLiteral(R"(^(https?://\S+|git@\S+:\S+|ssh://\S+|git://\S+))"),
-        QRegularExpression::CaseInsensitiveOption);
-    if (auto m = urlRe.match(s); m.hasMatch()) {
-        out.url  = m.captured(1);
-        out.name = QStringLiteral("origin");
-        out.ok   = true;
-        return out;
-    }
-
-    return out;
-}
+// Parsing logic moved to ui/AddRemoteParser.h so unit tests can
+// exercise it without instantiating widgets. The struct alias keeps
+// the call sites below readable.
+using Parsed = ParsedRemote;
 
 bool isSshUrl(const QString& url)
 {
@@ -146,7 +108,7 @@ bool    AddRemoteDialog::setUpstreamOnPush() const { return setUpstreamBox_->isC
 
 void AddRemoteDialog::onPasteChanged(const QString& text)
 {
-    auto p = parsePaste(text);
+    auto p = parseRemotePaste(text);
     if (!p.ok) return;
 
     nameEdit_->setText(p.name);

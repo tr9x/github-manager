@@ -1,6 +1,9 @@
 #pragma once
 
-// CloneDialog - asks the user where to clone a selected GitHub repo.
+// CloneDialog - asks the user where to clone a selected GitHub repo,
+// and (since 0.19.0) whether to use SSH or HTTPS for this particular
+// clone. The caller can prefill the SSH default from settings, but
+// the user can still flip it per-clone.
 //
 // This is presentation-only. The actual clone runs from MainWindow on
 // accept() so we can stream progress into the main status bar instead
@@ -14,6 +17,7 @@
 class QLineEdit;
 class QLabel;
 class QPushButton;
+class QCheckBox;
 
 namespace ghm::ui {
 
@@ -27,6 +31,19 @@ public:
 
     QString targetPath() const;
 
+    // Whether the user wants this clone over SSH. The caller can
+    // set the default (typically from Settings::clonePreferSsh()),
+    // and the user can override before accepting.
+    void setSshDefault(bool useSsh);
+    bool useSsh() const;
+
+    // Whether the user wants to point at a specific key file (with
+    // its own passphrase if encrypted) instead of using ssh-agent.
+    // Only meaningful when useSsh() is true. The host typically
+    // pops a SshKeyDialog when this is true so the actual key path
+    // and passphrase get collected.
+    bool useExplicitKey() const;
+
 private Q_SLOTS:
     void onBrowse();
     void onPathChanged(const QString& s);
@@ -37,6 +54,8 @@ private:
     QLineEdit*   parentDirEdit_;
     QLineEdit*   folderNameEdit_;
     QLabel*      finalPathLabel_;
+    QCheckBox*   sshCheckbox_;
+    QCheckBox*   sshExplicitKeyCheckbox_;
     QPushButton* okBtn_;
     QPushButton* cancelBtn_;
 };

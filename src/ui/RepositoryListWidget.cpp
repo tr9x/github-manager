@@ -1,4 +1,5 @@
 #include "ui/RepositoryListWidget.h"
+#include "core/TimeFormatting.h"
 
 #include <QListWidget>
 #include <QLineEdit>
@@ -17,17 +18,6 @@ namespace ghm::ui {
 namespace {
 constexpr int kRepoRole  = Qt::UserRole + 1;
 constexpr int kPathRole  = Qt::UserRole + 1;
-
-QString relativeTime(const QDateTime& when)
-{
-    if (!when.isValid()) return QStringLiteral("—");
-    const qint64 secs = when.secsTo(QDateTime::currentDateTimeUtc());
-    if (secs < 60)            return QObject::tr("just now");
-    if (secs < 60 * 60)       return QObject::tr("%1 min ago").arg(secs / 60);
-    if (secs < 60 * 60 * 24)  return QObject::tr("%1 h ago").arg(secs / 3600);
-    if (secs < 60 * 60 * 24 * 30) return QObject::tr("%1 d ago").arg(secs / 86400);
-    return QLocale().toString(when.toLocalTime().date(), QLocale::ShortFormat);
-}
 
 QLabel* makeSectionHeader(const QString& text, QWidget* parent)
 {
@@ -103,6 +93,13 @@ RepositoryListWidget::RepositoryListWidget(QWidget* parent)
     localList_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(localList_, &QListWidget::customContextMenuRequested,
             this, &RepositoryListWidget::onLocalContextMenu);
+
+    // GitHub list context menu — currently just visibility toggle.
+    // Future actions (delete repo, archive, transfer, change topic…)
+    // could live here too.
+    githubList_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(githubList_, &QListWidget::customContextMenuRequested,
+            this, &RepositoryListWidget::onGithubContextMenu);
 }
 
 RepositoryListWidget::~RepositoryListWidget() = default;
@@ -162,7 +159,7 @@ void RepositoryListWidget::styleGithubItem(QListWidgetItem* item,
         : QStringLiteral(" • ▼ local");
 
     const QString label = QStringLiteral("%1\n  %2 • %3%4")
-        .arg(repo.fullName, visibility, relativeTime(repo.updatedAt), localBadge);
+        .arg(repo.fullName, visibility, ghm::core::relativeTime(repo.updatedAt), localBadge);
     item->setText(label);
     item->setData(kRepoRole, QVariant::fromValue(repo));
     item->setToolTip(repo.description.isEmpty() ? repo.fullName : repo.description);
@@ -246,6 +243,40 @@ void RepositoryListWidget::onLocalContextMenu(const QPoint& pos)
     QAction* removeAct = menu.addAction(tr("Remove from sidebar"));
     if (menu.exec(localList_->viewport()->mapToGlobal(pos)) == removeAct) {
         Q_EMIT removeLocalFolderRequested(path);
+    }
+}
+
+void RepositoryListWidget::onGithubContextMenu(const QPoint& pos)
+{
+    auto* item = githubList_->itemAt(pos);
+    if (!item) return;
+    const auto repo = item->data(kRepoRole).value<ghm::github::Repository>();
+    if (!repo.isValid()) return;
+
+    QMenu menu(this);
+    // Toggle label tracks current state: if private show "Make
+    // public", if public show "Make private". This is clearer than
+    // a static "Change visibility…" entry because the action
+    // outcome is right there in the verb.
+    QAction* visAct = nullptr;
+    if (repo.isPrivate) {
+        visAct = menu.addAction(tr("Make public…"));
+        visAct->setToolTip(tr(
+            "Switch this repository from private to public. "
+            "Anyone on the internet will be able to read it."));
+    } else {
+        visAct = menu.addAction(tr("Make private…"));
+        visAct->setToolTip(tr(
+            "Switch this repository from public to private. "
+            "Stars and watchers will be erased; public forks "
+            "will be detached."));
+    }
+
+    QAction* picked = menu.exec(githubList_->viewport()->mapToGlobal(pos));
+    if (picked == visAct) {
+        // Emit makePrivate = !current. Host handles confirmation
+        // and the actual API call; we just signal intent.
+        Q_EMIT changeVisibilityRequested(repo, !repo.isPrivate);
     }
 }
 

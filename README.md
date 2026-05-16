@@ -1,260 +1,298 @@
 # GitHub Manager
 
-A native Linux desktop client for working with GitHub repositories and
-local Git folders. Built with Qt 6, libgit2, and libsecret.
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)]()
+[![C++](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)]()
+[![Qt](https://img.shields.io/badge/Qt-6.5%2B-41CD52.svg)]()
+
+A native Linux desktop client for managing GitHub repositories and
+local Git folders. Built with Qt 6 Widgets, libgit2, and libsecret —
+no Electron, no web wrapper, no telemetry. Just a desktop app that
+respects your system.
 
 ```
-   Sidebar                       Detail panel (local folder mode)
-   ┌──────────────────┐  ┌─────────────────────────────────────────┐
-   │ Search…          │  │ myproject                               │
-   ├──────────────────┤  │ /home/me/code/myproject                 │
-   │ GITHUB           │  │                                         │
-   │ • myorg/api      │  │ [master ↑2 ▾]    Author: Me <me@…>      │
-   │ • octocat/hello  │  │ ┌─────────────────────────────────────┐ │
-   │                  │  │ │ Changes  History  Remotes           │ │
-   │ LOCAL FOLDERS    │  │ ├─────────────────────────────────────┤ │
-   │ + Add local…     │  │ │ [A ] src/main.cpp                   │ │
-   │ • myproject      │  │ │ [ M] README.md                      │ │
-   │   /home/me/…     │  │ │ [??] notes.txt                      │ │
-   │                  │  │ │ ─────────────────────────────────── │ │
-   │                  │  │ │ Find in diff  (Ctrl+F)   3 of 17 ▲▼ │ │
-   │                  │  │ │ ─────────────────────────────────── │ │
-   │                  │  │ │   12 |   13 │  context line         │ │
-   │                  │  │ │      |   14 │ +added line           │ │
-   │                  │  │ │   13 |      │ -removed line         │ │
-   │                  │  │ │ ─────────────────────────────────── │ │
-   │                  │  │ │ Commit message...        [Commit]   │ │
-   │                  │  │ └─────────────────────────────────────┘ │
-   └──────────────────┘  └─────────────────────────────────────────┘
-                       Signed in as octocat
+   Sidebar                       Detail panel (remote repo)
+   ┌──────────────────┐  ┌────────────────────────────────────────┐
+   │ Search…          │  │ tr9xpl/github-manager                  │
+   ├──────────────────┤  │ Public repository                      │
+   │ GITHUB           │  │ Linux desktop GitHub repository...     │
+   │ • myorg/api      │  │                                        │
+   │ • octocat/hello  │  │ [Clone…] [Open Local…] [Open on GitHub]│
+   │ • tr9xpl/...★    │  │                                        │
+   │                  │  │ ╭─README─╮─Files─╮─About─╮             │
+   │ LOCAL FOLDERS    │  │ # github-manager                       │
+   │ + Add local…     │  │                                        │
+   │ • myproject      │  │ A native Linux desktop client for      │
+   │   /home/me/…     │  │ managing GitHub repositories and       │
+   │                  │  │ local Git folders. Built with Qt 6,    │
+   │                  │  │ libgit2, and libsecret...              │
+   └──────────────────┘  └────────────────────────────────────────┘
 ```
 
 ## Features
 
-### GitHub repositories
+**Local Git operations** — full feature set without leaving the app:
+- Stage / unstage / commit with author identity detection from
+  `~/.gitconfig`
+- Branch switching, creation, deletion, fast-forward / rebase pulls
+- Tags (lightweight and annotated), with GPG signing support
+- Stash save / list / pop / drop
+- Submodules with per-submodule SSH key memory
+- Conflict resolution UI when merges go sideways
+- Reflog viewer for recovering lost commits
+- "Undo last commit" with reset modes (soft/mixed/hard)
 
-- **Sign in with a GitHub Personal Access Token.** The token is validated
-  against the API before being stored in your system keyring (GNOME
-  Keyring, KWallet, KeePassXC — anything that speaks the
-  `org.freedesktop.Secret.Service` D-Bus interface). No plaintext fallback.
-- **Browse all your repos** (owner, collaborator, organization member),
-  with a search box and visual indicators for visibility and local-clone
-  status.
-- **Clone, pull, and push** through libgit2. The PAT is fed to libgit2
-  as the HTTPS password via a credentials callback — never written to
-  `.git/config`.
-- **Pull is fast-forward-only.** Divergent histories are reported as
-  conflicts; resolve them with the git CLI rather than producing
-  surprise merge commits.
+**GitHub integration**:
+- OAuth device flow or Personal Access Token authentication
+- Browse all your repos in a searchable sidebar
+- README, file tree, and project stats preview before cloning
+- One-click clone with HTTPS or SSH
+- Publish a local folder as a new GitHub repo (with optional
+  LICENSE and .gitignore templates)
+- Toggle repository visibility (public ↔ private) from a context menu
+- Push, pull, fetch with progress feedback
 
-### Publish a local folder to GitHub
+**Security & privacy**:
+- Tokens stored in the system keyring (libsecret / GNOME Keyring /
+  KWallet via libsecret)
+- TLS certificate approval UI for self-signed / internal CAs —
+  manage trusted servers from a dedicated settings page
+- GPG commit and tag signing with verification badges in History
+- Per-submodule explicit SSH key support for deploy keys
+- No telemetry, no analytics, no "phone home"
 
-The most polished part of the app. From an arbitrary directory on disk
-to a fully wired-up, pushed-to-GitHub repository in a couple of clicks:
+**UI niceties**:
+- Light and dark theme support
+- Multi-language UI: English, Polski, Deutsch, Español, Français
+  (partial coverage for the latter three)
+- Inline diff viewer with syntax highlighting
+- History filter with match counter ("3 of 47")
+- Viewport-only signature verification — no waiting on GPG for
+  commits you're not looking at
+- F5 to refresh, Ctrl+E to open repo folder, right-click for
+  context actions everywhere it makes sense
+- Click the version label in the bottom-right to see the full
+  changelog
 
-- **One dialog, two paths.** *Create a new GitHub repository* (the app
-  POSTs to `/user/repos` for you, no need to visit github.com first), or
-  *Link to an existing repository* (pick from your repo list).
-- **Smart defaults.** Repo name pre-filled from folder name, sanitised
-  for GitHub's naming rules. Collisions with your existing repos
-  detected before submit.
-- **Optional one-shot push.** Leave "Push my commits after publishing"
-  ticked and the app does `git remote add origin … + git push -u origin
-  <branch>` for you. Replaces the entire `git init … remote add … push`
-  dance with a single button.
-- **Identity prompted lazily.** First commit asks for your name and
-  email once and remembers them.
+## Screenshots
 
-### Local-folder workflow (any directory on disk)
+*(Drop screenshots in `docs/screenshots/` and link them here. The
+short ASCII diagram at the top of this README is what a screenshot
+would replace.)*
 
-- **Add any folder** to a "Local Folders" section in the sidebar. Works
-  for both existing repositories and fresh directories.
-- **`git init`** for non-repo folders, with a configurable initial
-  branch name (defaults to `master` to match GitHub's "create empty
-  repo" instructions; `main` also works).
-- **Three-tab workflow**:
-  - **Changes** — per-file status (`[I W] path`, mirroring `git status
-    --short`), multi-select stage / unstage, "Stage all" (`git add .`),
-    a commit message field, and a **side-by-side diff view** for the
-    selected file (green additions, red deletions, blue hunk headers,
-    colour-coded line numbers).
-  - **History** — `git log` rendered as a list, with the full commit
-    message and **the diff a commit introduces** (a la `git show`)
-    shown for each click. Lists files changed by the commit; clicking
-    a file shows that file's diff.
-  - **Remotes** — list of configured remotes, "Add remote…" with smart
-    paste (drop in the entire `git remote add origin …` line GitHub
-    gives you, or just the URL), and a Push panel with optional "Set
-    upstream (-u)".
-- **Branch management.** The branch name in the header is a popup
-  picker — click to switch branches, create a new one (with rule-based
-  name validation: rejects spaces, leading dots, reserved names, etc.),
-  or delete one. Force-delete prompts a second confirmation when the
-  branch has unique commits.
+## Install
 
-### Diff viewer
+### Arch Linux / Manjaro
 
-- **Unified diff with colours**, line numbers in a left gutter, hunk
-  headers that match what `git diff` shows.
-- **Find in diff (Ctrl+F).** A permanent search bar above every diff
-  pane. Highlights all matches, navigate with `Enter` / `Shift+Enter`
-  or the ▲▼ arrows. Live counter ("3 of 17"). Toggle case-sensitive
-  with the `Aa` button. Esc clears the query.
-- **Reused everywhere.** The same diff view is used for working-tree
-  changes (Changes tab) and historical commits (History tab), so you
-  learn one set of UX once.
+```bash
+git clone https://github.com/tr9xpl/github-manager.git
+cd github-manager
+python install.py
+```
 
-### Cross-cutting
+The installer pulls dependencies via pacman, configures with CMake,
+builds with Ninja, and installs to `~/.local`. After it finishes:
 
-- **Auto-refresh.** `QFileSystemWatcher` watches `.git/HEAD`,
-  `.git/index`, and the working-tree root for external changes
-  (file edits, CLI git operations, branch switches, etc.). Hits are
-  debounced (300 ms) so a single `git add .` from your terminal
-  triggers exactly one UI refresh.
-- **Multilingual.** UI available in English and Polish; switch under
-  *Settings → Language*. Defaults to system locale on first run.
-- **Non-blocking UI.** GitHub HTTP calls use `QNetworkAccessManager`;
-  libgit2 work goes through `QtConcurrent::run` with a
-  `QFutureWatcher` marshalling results back to the GUI thread.
-- **Dark theme** by default (disable with `--no-dark-mode`).
+```bash
+github-manager
+```
+
+…or launch from your application menu (a `.desktop` file is
+installed under `~/.local/share/applications/`).
+
+### Ubuntu / Debian
+
+```bash
+sudo apt install build-essential cmake ninja-build pkg-config \
+                 qt6-base-dev qt6-tools-dev qt6-tools-dev-tools \
+                 libgit2-dev libsecret-1-dev git
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+cmake --build build --parallel
+cmake --install build --prefix ~/.local
+```
+
+### Fedora
+
+```bash
+sudo dnf install gcc-c++ cmake ninja-build pkgconf-pkg-config \
+                 qt6-qtbase-devel qt6-qttools-devel \
+                 libgit2-devel libsecret-devel git
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+cmake --build build --parallel
+cmake --install build --prefix ~/.local
+```
+
+### OAuth setup (optional)
+
+GitHub Manager works fine with Personal Access Tokens (the default).
+For one-click OAuth device flow login, supply a GitHub OAuth App
+client ID at build time:
+
+```bash
+cmake -S . -B build -DGHM_OAUTH_CLIENT_ID=Ov23liXXXXXXXXXXXXXX -G Ninja
+```
+
+Without `GHM_OAUTH_CLIENT_ID`, the app falls back to PAT-only login.
+Create a PAT at https://github.com/settings/tokens with `repo`
+scope (or `public_repo` if you only manage public repos).
+
+## Quick tour
+
+After signing in:
+
+1. **Browse your GitHub repos** in the left sidebar. Click any one
+   to see its README, root file listing, languages bar, stars,
+   forks, and topics — without cloning.
+2. **Clone** a repo via the Clone… button. The clone happens in a
+   background thread; the sidebar updates when it's done.
+3. **Open** an existing local folder via *File → Add Local Folder…*.
+   GitHub Manager detects whether it's a git repository and reveals
+   the working-copy controls if so.
+4. **Make changes**, then use the Changes tab to stage and commit.
+   Author identity comes from your `~/.gitconfig`.
+5. **Push** via the toolbar. First push to a new branch sets the
+   upstream automatically.
+
+## Keyboard shortcuts
+
+| Action                    | Shortcut          |
+|---------------------------|-------------------|
+| Refresh status / history  | F5 or Ctrl+R      |
+| Open folder in file mgr   | Ctrl+E            |
+| Fetch from origin         | Ctrl+Shift+F      |
+| Undo last commit…         | Ctrl+Shift+Z      |
+| Quit                      | Ctrl+Q            |
+| Search filter in lists    | Ctrl+F            |
 
 ## Architecture
 
-| Component | Responsibility |
-|-----------|---------------|
-| `core/SecureStorage` | libsecret-backed PAT vault. The only place that touches the keyring. |
-| `core/Settings` | QSettings wrapper for non-secret preferences (last user, paths, window state, author identity, local folder list, default init branch, language). |
-| `core/Translator` | In-process `QTranslator` subclass holding an EN→PL phrasebook. No `.ts/.qm` pipeline required. |
-| `github/Repository` | Plain data model for a GitHub repo. |
-| `github/GitHubClient` | Async REST client (auth, repo listing with pagination, repository creation). |
-| `git/GitHandler` | Synchronous libgit2 wrapper with RAII handles. Implements clone/pull/push, full local workflow (init, status, stage, commit, log, remote add/remove, push), branch management, and diff (single-file + commit). |
-| `git/GitWorker` | Adapts `GitHandler` to async signal/slot semantics via `QtConcurrent`. |
-| `ui/MainWindow` | Coordinator — owns long-lived collaborators, wires signals, hosts a `QStackedWidget` swapping the detail panel. |
-| `ui/RepositoryListWidget` | Sidebar with two sections: GitHub repos and local folders. |
-| `ui/RepositoryDetailWidget` | GitHub-clone detail panel (read-only file tree, branch combo, push/pull buttons). |
-| `ui/LocalRepositoryWidget` | Local-folder detail panel with three tabs (Changes / History / Remotes), branch picker, identity bar. |
-| `ui/DiffViewWidget` | Read-only unified-diff renderer with permanent search bar (Ctrl+F). |
-| `ui/SearchBar` | Reusable Ctrl+F find-bar (live highlights, prev/next, case toggle). |
-| `ui/LoginDialog` | Token entry + validation. |
-| `ui/CloneDialog` | Picks target directory for a clone. |
-| `ui/PublishToGitHubDialog` | Two-mode publish dialog (create new / link existing). |
-| `ui/AddRemoteDialog` | Smart-paste remote-add dialog. |
-| `ui/CreateBranchDialog` | New-branch creation with name validation. |
-| `ui/IdentityDialog` | Lazy-prompted git author name + email. |
-| `ui/SupportDialog` | "Help → Support / Donate" — author info and donation details. |
-
-## Local-folder workflow at a glance
-
-The fastest path from "empty directory on disk" to "pushed to GitHub":
-
-1. **File → Add Local Folder…** (or `Ctrl+L`), pick the folder.
-2. If the folder isn't a git repo yet, the panel shows **Initialize
-   Repository** with a branch-name field. Click **Initialize**.
-3. **Changes** tab: edit files in your editor, the app auto-refreshes
-   when you save. Stage files (or **Stage all** for `git add .`), write
-   a commit message, click **Commit**. The first commit prompts for
-   your name + email.
-4. Click **Publish to GitHub…** in the blue banner that appears once
-   you have commits but no `origin`. Pick *Create new* or *Link to
-   existing*; leave **Push my commits** ticked. One click does the rest.
-5. From here on, just **Commit** + **Push** in the Remotes tab as
-   normal.
-
-Equivalent CLI sequence:
-
-```bash
-git init -b master
-git add .
-git commit -m "Initial commit"
-gh repo create myproject --public --source=. --remote=origin --push
-# (or:  git remote add origin <url> + git push -u origin master)
+```
+src/
+├── core/           # Settings, SecureStorage (libsecret), Translator
+├── git/            # GitHandler (sync, reentrant), GitWorker (async),
+│                   # CommitSigner (GPG), SignatureVerifier
+├── github/         # GitHubClient (REST + OAuth device flow), Repository
+├── session/        # SessionController, OAuthFlowController
+├── workspace/      # LocalWorkspaceController, PublishController,
+│                   # ConflictController, GitHubCloneController
+└── ui/             # MainWindow, dialogs, widgets
 ```
 
-## Building
+**Threading model**: libgit2 work happens on a dedicated worker
+thread (`GitWorker`); GUI thread never blocks on disk or network.
+Credential prompts (SSH host keys, TLS certificates, OAuth) use
+`BlockingQueuedConnection` to pop dialogs synchronously from the
+worker's perspective.
 
-### Dependencies
+**Storage**: Settings via `QSettings` (INI under `~/.config/`),
+tokens via libsecret. No SQLite, no per-app config directory soup.
 
-- Qt 6.4 or newer (`qt6-base`, `qt6-tools`)
-- libgit2 (1.6+)
+**Translations**: Qt's standard `.ts` → `.qm` pipeline. PL has full
+coverage; DE / ES / FR have partial coverage for common UI
+vocabulary (menus, buttons, common labels). See *Contributing →
+Translations* below.
+
+## Building from source
+
+Requires:
+- C++20 compiler (GCC 11+ or Clang 14+)
+- CMake 3.21+
+- Qt 6.5+ (Core, Gui, Widgets, Network, Concurrent, LinguistTools)
+- libgit2 1.5+
 - libsecret 0.20+
-- A C++20 compiler (gcc 13+, clang 16+)
-- CMake 3.20+, Ninja or make
-
-### Distro packages
+- Ninja (recommended; Make works too)
 
 ```bash
-# Arch / Manjaro
-sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-tools libgit2 libsecret git
-
-# Debian / Ubuntu
-sudo apt install build-essential cmake ninja-build pkg-config \
-    qt6-base-dev qt6-tools-dev qt6-tools-dev-tools \
-    libgit2-dev libsecret-1-dev git
-
-# Fedora
-sudo dnf install gcc-c++ cmake ninja-build pkgconf-pkg-config \
-    qt6-qtbase-devel qt6-qttools-devel libgit2-devel libsecret-devel git
-```
-
-### Install via the wrapper script
-
-```bash
-python3 install.py            # installs to ~/.local/bin
-python3 install.py --system   # installs to /usr/local/bin (needs sudo)
-```
-
-The script detects your distro, installs missing dependencies, runs
-CMake, builds, and copies the binary + the `.desktop` file into place.
-
-### Manual build
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build --parallel
-./build/github-manager
 ```
 
-### Uninstall
+The build embeds CHANGELOG.md and translation `.qm` files as Qt
+resources — no runtime file lookup, no path issues. The resulting
+binary at `build/github-manager` is self-contained apart from its
+dynamic library dependencies (libgit2, libsecret, Qt itself).
+
+## Tests
+
+Opt-in via `-DGHM_BUILD_TESTS=ON`:
 
 ```bash
-python3 uninstall.py
+cmake -S . -B build -DGHM_BUILD_TESTS=ON -G Ninja
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-## Limitations / known scope cuts
+Unit tests cover parsers and pure helpers (Link header parsing, SSH
+URL conversion, OAuth response parsing, branch name validation, repo
+name suggestion). Integration tests exercise GitHandler against
+temp directories with libgit2.
 
-- **No merge / rebase / cherry-pick.** Branches and merges still happen
-  in your CLI for now; the app handles linear history (commit / push /
-  fast-forward pull / branch create-switch-delete).
-- **No SSH clones or pushes.** HTTPS + PAT only. SSH URLs are detected
-  and a warning is shown when adding such a remote.
-- **No two-factor flow.** PATs (or fine-grained tokens) are required.
-- **No commit signing.** GPG/SSH signing isn't wired through libgit2's
-  callback yet.
-- **No submodules support.** `.gitmodules` is not handled.
+## Contributing
 
-See `ROADMAP.md` (or open an issue) for what's planned next — the next
-likely additions are SSH support, branch rename, and a tag manager.
+### Bug reports
 
-## Privacy and data handling
+Open an issue. Include:
+- Linux distro and version (`cat /etc/os-release`)
+- Qt version (`pacman -Q qt6-base` or equivalent)
+- libgit2 version (`pacman -Q libgit2` or `pkg-config --modversion libgit2`)
+- What you expected vs what happened
+- Any stderr output (run from terminal to capture it)
 
-- Your PAT lives in your system keyring only, accessed exclusively
-  through `core/SecureStorage`. The app never logs it, sends it
-  anywhere except `api.github.com`, or writes it to disk in plaintext.
-- Your git author identity (`name`, `email`) is stored in `QSettings`
-  on this machine and used only when creating commits locally. It is
-  never sent to GitHub directly — it goes into the commit, which is
-  later pushed by you.
-- `Settings → Language`, the list of local folders, last sign-in name,
-  and window geometry are also stored in `QSettings`. Nothing else
-  leaves your computer.
+### Code
 
-## Support / Donate
+Pull requests welcome. Style notes:
+- C++20 with Qt-flavored idioms (`QString`, `Q_OBJECT`, signals/slots)
+- Format with `clang-format` if your editor supports it
+- New widgets go under `src/ui/`; pure logic helpers under
+  `src/core/` or `src/git/`
+- Add unit tests for parsers and pure helpers; integration tests
+  for anything that touches libgit2
 
-GitHub Manager is built in spare time. If it saves you time and you
-want to chip in, *Help → Support / Donate…* shows bank transfer details
-in PLN. Every contribution helps keep the project alive — fixing bugs,
-adding features, supporting Linux as a first-class platform.
+### Translations
+
+Adding a new language:
+1. Copy `translations/github-manager_pl.ts` to
+   `translations/github-manager_<langcode>.ts`
+2. Change the `language="…"` attribute in the `<TS>` tag
+3. Blank out the `<translation>` elements (or use Qt Linguist)
+4. Add the filename to `GHM_TS_FILES` in `CMakeLists.txt`
+5. Add the language to `Settings::supportedLanguages()` and
+   `Settings::languageDisplayName()` in `src/core/Settings.cpp`
+6. Translate strings in Qt Linguist; rebuild
+
+The format is Qt-standard so any translation tooling (Weblate,
+Crowdin, Transifex) can ingest it.
+
+Completing existing partial translations (DE, ES, FR) is also
+welcome — those have ~12% coverage and would benefit from native
+speaker review.
+
+## Roadmap
+
+See `CHANGELOG.md` for what's done. Open issues for what's planned.
+
+Big-picture: 1.0 is feature-complete for the everyday "manage my
+GitHub repos and local folders" workflow. Future directions include
+GraphQL API support (for issues/PRs/discussions inline), git-lfs
+handling, README image rendering, and broader translation coverage.
+
+## Support
+
+GitHub Manager is built in spare time. If it saves you time and
+you'd like to chip in, *Help → Support / Donate…* shows bank
+transfer details. Every contribution helps keep the project alive.
 
 ## License
 
-(See `LICENSE` in the repository root.)
+See `LICENSE` in the repository root.
+
+## Acknowledgements
+
+Built on the shoulders of:
+- [Qt 6](https://www.qt.io/) — UI framework
+- [libgit2](https://libgit2.org/) — Git plumbing
+- [libsecret](https://wiki.gnome.org/Projects/Libsecret) — credential storage
+- [GitHub REST API](https://docs.github.com/en/rest) — remote operations
+
+Inspired by GitHub Desktop, GitKraken, and the wish for a Linux-native
+client that doesn't ship a Chromium runtime.

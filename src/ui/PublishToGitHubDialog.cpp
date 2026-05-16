@@ -1,4 +1,6 @@
 #include "ui/PublishToGitHubDialog.h"
+#include "ui/RepoNameSuggester.h"
+#include "core/TimeFormatting.h"
 
 #include <QFormLayout>
 #include <QVBoxLayout>
@@ -8,6 +10,7 @@
 #include <QLineEdit>
 #include <QRadioButton>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QStackedWidget>
 #include <QListWidget>
 #include <QCheckBox>
@@ -23,48 +26,8 @@ namespace {
 
 constexpr int kRepoRole = Qt::UserRole + 1;
 
-QString relativeTime(const QDateTime& when)
-{
-    if (!when.isValid()) return QStringLiteral("—");
-    const qint64 secs = when.secsTo(QDateTime::currentDateTimeUtc());
-    if (secs < 60)              return QObject::tr("just now");
-    if (secs < 60 * 60)         return QObject::tr("%1 min ago").arg(secs / 60);
-    if (secs < 60 * 60 * 24)    return QObject::tr("%1 h ago").arg(secs / 3600);
-    if (secs < 60 * 60 * 24 * 30) return QObject::tr("%1 d ago").arg(secs / 86400);
-    return QLocale().toString(when.toLocalTime().date(), QLocale::ShortFormat);
-}
-
-// Sanitises a folder name into something GitHub will accept.
-// GitHub repo names: ASCII letters/digits, '-', '_', '.'. Anything else
-// becomes a hyphen, runs of hyphens collapse, leading/trailing
-// hyphens/dots are trimmed. Empty result means we couldn't derive
-// anything sensible.
-QString suggestRepoName(const QString& folderName)
-{
-    QString out;
-    out.reserve(folderName.size());
-    bool prevHyphen = false;
-    for (QChar c : folderName) {
-        if (c.isLetterOrNumber() || c == QLatin1Char('-')
-                                 || c == QLatin1Char('_')
-                                 || c == QLatin1Char('.')) {
-            out.append(c);
-            prevHyphen = (c == QLatin1Char('-'));
-        } else {
-            if (!prevHyphen && !out.isEmpty()) out.append(QLatin1Char('-'));
-            prevHyphen = true;
-        }
-    }
-    while (!out.isEmpty() && (out.endsWith(QLatin1Char('-')) ||
-                              out.endsWith(QLatin1Char('.')))) {
-        out.chop(1);
-    }
-    while (!out.isEmpty() && (out.startsWith(QLatin1Char('-')) ||
-                              out.startsWith(QLatin1Char('.')))) {
-        out.remove(0, 1);
-    }
-    return out;
-}
+// suggestRepoName moved to ui/RepoNameSuggester.h so unit tests can
+// exercise it without spinning up Qt widgets.
 
 } // namespace
 
@@ -85,6 +48,8 @@ PublishToGitHubDialog::PublishToGitHubDialog(
     , descEdit_(new QLineEdit(this))
     , publicRadio_ (new QRadioButton(tr("Public"),  this))
     , privateRadio_(new QRadioButton(tr("Private"), this))
+    , licenseCombo_(new QComboBox(this))
+    , gitignoreCombo_(new QComboBox(this))
     , createPreviewLabel_(new QLabel(this))
     , createWarningLabel_(new QLabel(this))
     , searchEdit_(new QLineEdit(this))
@@ -142,6 +107,70 @@ PublishToGitHubDialog::PublishToGitHubDialog(
         visRow->addWidget(privateRadio_);
         visRow->addStretch();
 
+        // License combobox. The items are (display, github-key) pairs.
+        // We hardcode the most common ~10 — these match GitHub's
+        // "Choose a license" featured/common list. Fetching from
+        // /licenses dynamically would add a network call before the
+        // dialog could open; not worth it for a list that hasn't
+        // changed in years. Empty "key" means "no license" (default).
+        struct LicenseChoice { const char* display; const char* key; };
+        static const LicenseChoice kLicenses[] = {
+            { "(none)",                                            "" },
+            { "MIT License",                                       "mit" },
+            { "Apache License 2.0",                                "apache-2.0" },
+            { "GNU General Public License v3.0",                   "gpl-3.0" },
+            { "GNU General Public License v2.0",                   "gpl-2.0" },
+            { "GNU Lesser General Public License v3.0",            "lgpl-3.0" },
+            { "GNU Affero General Public License v3.0",            "agpl-3.0" },
+            { "BSD 2-Clause \"Simplified\" License",               "bsd-2-clause" },
+            { "BSD 3-Clause \"New\" or \"Revised\" License",       "bsd-3-clause" },
+            { "Mozilla Public License 2.0",                        "mpl-2.0" },
+            { "Boost Software License 1.0",                        "bsl-1.0" },
+            { "The Unlicense",                                     "unlicense" },
+        };
+        for (const auto& l : kLicenses) {
+            licenseCombo_->addItem(tr(l.display), QString::fromLatin1(l.key));
+        }
+        licenseCombo_->setToolTip(tr(
+            "Adds a LICENSE file to the initial commit on GitHub. "
+            "Required for repos you intend to share publicly. If your "
+            "local folder already has commits, GitHub will create its "
+            "own initial commit with LICENSE — you'll need to pull "
+            "before pushing (or accept that LICENSE comes from "
+            "GitHub's side only)."));
+
+        // Gitignore combobox. Same shape as licenses; values come
+        // from GitHub's gitignore template list. We carry a curated
+        // common subset — Python, Node, C++, etc. Empty = no
+        // .gitignore added.
+        struct GitignoreChoice { const char* display; const char* key; };
+        static const GitignoreChoice kGitignores[] = {
+            { "(none)",      "" },
+            { "C",           "C" },
+            { "C++",         "C++" },
+            { "Go",          "Go" },
+            { "Java",        "Java" },
+            { "JavaScript",  "Node" },        // GitHub key is "Node"
+            { "Python",      "Python" },
+            { "Ruby",        "Ruby" },
+            { "Rust",        "Rust" },
+            { "Swift",       "Swift" },
+            { "Kotlin",      "Java" },        // closest match
+            { "TypeScript",  "Node" },
+            { "Visual Studio (.NET)", "VisualStudio" },
+            { "Unity",       "Unity" },
+            { "Qt",          "Qt" },
+            { "CMake",       "CMake" },
+        };
+        for (const auto& g : kGitignores) {
+            gitignoreCombo_->addItem(tr(g.display), QString::fromLatin1(g.key));
+        }
+        gitignoreCombo_->setToolTip(tr(
+            "Adds a .gitignore file to the initial commit on GitHub. "
+            "Same caveat as the license: if your local folder already "
+            "has commits, you'll need to pull GitHub's initial commit "
+            "before pushing."));
+
         createPreviewLabel_->setStyleSheet(QStringLiteral("color: #8ab4f8;"));
         createPreviewLabel_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         createPreviewLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -160,6 +189,8 @@ PublishToGitHubDialog::PublishToGitHubDialog(
         form->addRow(tr("Name:"),        nameEdit_);
         form->addRow(tr("Description:"), descEdit_);
         form->addRow(tr("Visibility:"),  visRow);
+        form->addRow(tr("License:"),     licenseCombo_);
+        form->addRow(tr(".gitignore:"),  gitignoreCombo_);
 
         auto* col = new QVBoxLayout(createPage);
         col->setContentsMargins(0, 0, 0, 0);
@@ -201,6 +232,21 @@ PublishToGitHubDialog::PublishToGitHubDialog(
                     tr("⚠ GitHub repository names may only contain letters, "
                        "digits, hyphens, underscores, and dots."));
                 createWarningLabel_->setVisible(true);
+            } else if (licenseCombo_->currentIndex() > 0
+                       || gitignoreCombo_->currentIndex() > 0) {
+                // License OR gitignore picked → GitHub will auto_init
+                // the repo. Local commits won't push cleanly until the
+                // user pulls GitHub's initial commit. Warn them so the
+                // workflow doesn't surprise them.
+                createWarningLabel_->setText(
+                    tr("ℹ Adding a LICENSE or .gitignore will make GitHub "
+                       "create the repository with an initial commit. If "
+                       "your local folder already has commits, you'll "
+                       "need to run <code>git pull --rebase</code> before "
+                       "pushing (or uncheck \"Push my commits after "
+                       "publishing\" and resolve the merge yourself)."));
+                createWarningLabel_->setTextFormat(Qt::RichText);
+                createWarningLabel_->setVisible(true);
             } else {
                 createWarningLabel_->setVisible(false);
             }
@@ -209,6 +255,13 @@ PublishToGitHubDialog::PublishToGitHubDialog(
         connect(nameEdit_, &QLineEdit::textChanged, this, [refreshPreview](const QString&) {
             refreshPreview();
         });
+        // License / gitignore combo changes should also re-evaluate
+        // the warning state — picking a license triggers the
+        // auto_init notice; picking (none) clears it.
+        connect(licenseCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [refreshPreview](int) { refreshPreview(); });
+        connect(gitignoreCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [refreshPreview](int) { refreshPreview(); });
         refreshPreview();
     }
 
@@ -290,6 +343,19 @@ QString PublishToGitHubDialog::description() const { return descEdit_->text().tr
 bool    PublishToGitHubDialog::isPrivate()   const { return privateRadio_->isChecked(); }
 bool    PublishToGitHubDialog::pushAfterPublish() const { return pushBox_->isChecked(); }
 
+QString PublishToGitHubDialog::licenseTemplate() const
+{
+    // currentData() carries the GitHub key (e.g. "mit"); the "(none)"
+    // entry has an empty string so a no-license selection naturally
+    // returns "" to callers.
+    return licenseCombo_ ? licenseCombo_->currentData().toString() : QString();
+}
+
+QString PublishToGitHubDialog::gitignoreTemplate() const
+{
+    return gitignoreCombo_ ? gitignoreCombo_->currentData().toString() : QString();
+}
+
 ghm::github::Repository PublishToGitHubDialog::existingRepo() const
 {
     auto* item = existingList_->currentItem();
@@ -344,7 +410,7 @@ void PublishToGitHubDialog::rebuildExistingList()
             ? QString()
             : QStringLiteral(" • already cloned");
         const QString line = QStringLiteral("%1\n  %2 • %3%4")
-            .arg(r.fullName, visibility, relativeTime(r.updatedAt), localBadge);
+            .arg(r.fullName, visibility, ghm::core::relativeTime(r.updatedAt), localBadge);
 
         auto* item = new QListWidgetItem(line, existingList_);
         item->setData(kRepoRole, QVariant::fromValue(r));

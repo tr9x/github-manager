@@ -48,11 +48,20 @@ Q_SIGNALS:
     void addLocalFolderClicked();
     void removeLocalFolderRequested(const QString& path);
 
+    // Emitted from the GitHub list's context menu when the user
+    // picks "Make public" / "Make private". The host catches this,
+    // confirms intent, and dispatches to GitHubClient. We carry
+    // the full Repository so the host can show its name in the
+    // confirmation dialog without a second lookup.
+    void changeVisibilityRequested(const ghm::github::Repository& repo,
+                                      bool makePrivate);
+
 private Q_SLOTS:
     void onGithubSelectionChanged();
     void onLocalSelectionChanged();
     void onFilterChanged(const QString& text);
     void onLocalContextMenu(const QPoint& pos);
+    void onGithubContextMenu(const QPoint& pos);
 
 private:
     void rebuildGithubItems();

@@ -1,4 +1,5 @@
 #include "ui/CreateBranchDialog.h"
+#include "ui/BranchNameValidator.h"
 
 #include <QFormLayout>
 #include <QVBoxLayout>
@@ -13,47 +14,12 @@ namespace ghm::ui {
 
 namespace {
 
-// Subset of git-check-ref-format rules that catch the obvious
-// mistakes. We're not trying to be exhaustive — libgit2 will reject
-// anything we miss with a clear error. The point is to give immediate
-// feedback for things like "feature branch" (space) or starting with '.'.
-//
-// Rules enforced here:
-//   * cannot be empty
-//   * cannot contain space, tab, or any of: ~ ^ : ? * [ (backslash)
-//   * cannot start with '-' or '.'
-//   * cannot end with '/' or '.'
-//   * cannot contain ".." or "@{"
-//   * cannot be exactly "HEAD" or "@"
+// Validation logic moved to ui/BranchNameValidator.h so unit tests can
+// run it without spinning up a QApplication. The local alias keeps
+// the existing call sites readable.
 bool nameLooksValid(const QString& s, QString* whyNot)
 {
-    auto fail = [&](QString reason) {
-        if (whyNot) *whyNot = std::move(reason);
-        return false;
-    };
-
-    if (s.isEmpty())                       return fail(QObject::tr("Name is empty."));
-    if (s.startsWith(QLatin1Char('-')))    return fail(QObject::tr("Cannot start with '-'."));
-    if (s.startsWith(QLatin1Char('.')))    return fail(QObject::tr("Cannot start with '.'."));
-    if (s.endsWith(QLatin1Char('/')))      return fail(QObject::tr("Cannot end with '/'."));
-    if (s.endsWith(QLatin1Char('.')))      return fail(QObject::tr("Cannot end with '.'."));
-    if (s == QLatin1String("HEAD") ||
-        s == QLatin1String("@"))            return fail(QObject::tr("Reserved name."));
-    if (s.contains(QLatin1String("..")))   return fail(QObject::tr("Cannot contain '..'."));
-    if (s.contains(QLatin1String("@{")))   return fail(QObject::tr("Cannot contain '@{'."));
-
-    for (QChar c : s) {
-        if (c.isSpace())                    return fail(QObject::tr("Cannot contain whitespace."));
-        const ushort u = c.unicode();
-        if (u == '~' || u == '^' || u == ':' || u == '?' ||
-            u == '*' || u == '[' || u == '\\') {
-            return fail(QObject::tr("Cannot contain '%1'.").arg(c));
-        }
-        if (u < 0x20 || u == 0x7F) {
-            return fail(QObject::tr("Cannot contain control characters."));
-        }
-    }
-    return true;
+    return isValidBranchName(s, whyNot);
 }
 
 } // namespace
